@@ -1,6 +1,10 @@
 use std::iter::Peekable;
 use std::str::Chars;
 
+// /////////////////////////////////////////////////////////// //
+// LEXER                                                       //
+// /////////////////////////////////////////////////////////// //
+
 #[derive(PartialEq, Clone, Debug)]
 enum TokenKind {
     Integer,
@@ -15,7 +19,7 @@ enum TokenKind {
 }
 
 #[derive(Debug)]
-struct Token {
+pub struct Token {
     kind: TokenKind,
     value: Option<String>,
 }
@@ -112,14 +116,88 @@ impl<'a> Lexer<'a> {
     }
 }
 
-pub struct Interpreter<'a> {
-    lexer: Lexer<'a>,
+// /////////////////////////////////////////////////////////// //
+// PARSER                                                      //
+// /////////////////////////////////////////////////////////// //
+
+#[derive(Debug)]
+pub enum Node {
+    BinOp,
+    Num,
+}
+
+pub trait Ast<'a> {
+    fn node(&self) -> Node;
+    fn token(&self) -> &Token;
+    fn value(&self) -> Option<&str>;
+    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)>;
+}
+
+struct BinOp<'a> {
+    token: Token,
+    left: Box<dyn Ast<'a> + 'a>,
+    right: Box<dyn Ast<'a> + 'a>,
+}
+
+struct Num {
+    token: Token,
+    value: String,
+}
+
+impl<'a> BinOp<'a> {
+    fn new(left: Box<dyn Ast<'a> + 'a>, token: Token, right: Box<dyn Ast<'a> + 'a>) -> Self {
+        BinOp { token, left, right }
+    }
+}
+
+impl<'a> Ast<'a> for BinOp<'a> {
+    fn node(&self) -> Node {
+        Node::BinOp
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn value(&self) -> Option<&str> {
+        None
+    }
+
+    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)> {
+        vec![&*self.left, &*self.right]
+    }
+}
+
+impl Num {
+    fn new(token: Token) -> Self {
+        let value = token.value.clone().unwrap();
+        Num { token, value }
+    }
+}
+
+impl<'a> Ast<'a> for Num {
+    fn node(&self) -> Node {
+        Node::Num
+    }
+    fn token(&self) -> &Token {
+        &self.token
+    }
+    fn value(&self) -> Option<&str> {
+        Some(&self.value)
+    }
+    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)> {
+        vec![]
+    }
+}
+
+pub struct Parser<'a> {
+    lexer: &'a mut Lexer<'a>,
     current_token: Token,
 }
 
-impl<'a> Interpreter<'a> {
-    pub fn new(lexer: Lexer<'a>) -> Self {
-        Interpreter {
+impl<'a> Parser<'a> {
+    pub fn new(lexer: &'a mut Lexer<'a>) -> Self {
+        Parser {
             lexer,
             current_token: Token::new(TokenKind::Root, None),
         }
@@ -137,7 +215,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn factor(&mut self) -> i32 {
+    fn factor(&mut self) -> Box<dyn Ast<'a> + 'a> {
         let token = Token::new(
             self.current_token.kind.clone(),
             self.current_token.value.clone(),
@@ -145,50 +223,109 @@ impl<'a> Interpreter<'a> {
 
         if self.current_token.kind == TokenKind::Integer {
             self.eat(TokenKind::Integer).unwrap();
-            token.value.as_ref().unwrap().parse::<i32>().unwrap()
+            Box::new(Num::new(token))
         } else {
             self.eat(TokenKind::Lparen).unwrap();
-            let result = self.expr();
+            let node = self.expr();
             self.eat(TokenKind::Rparen).unwrap();
-            result
+            node
         }
     }
 
-    fn term(&mut self) -> i32 {
-        let mut result = self.factor();
+    fn term(&mut self) -> Box<dyn Ast<'a> + 'a> {
+        let mut node = self.factor();
+        let mut current_token = Token {
+            kind: self.current_token.kind.clone(),
+            value: self.current_token.value.clone(),
+        };
 
         while [TokenKind::Mul, TokenKind::Div].contains(&self.current_token.kind) {
-            if self.current_token.kind == TokenKind::Mul {
+            if current_token.kind == TokenKind::Mul {
                 self.eat(TokenKind::Mul).unwrap();
-                result *= self.factor();
             } else {
                 self.eat(TokenKind::Div).unwrap();
-                result /= self.factor();
             }
+            node = Box::new(BinOp::new(node, current_token, self.factor()));
+            current_token = Token {
+                kind: self.current_token.kind.clone(),
+                value: self.current_token.value.clone(),
+            };
         }
 
-        result
+        node
     }
 
-    fn expr(&mut self) -> i32 {
-        let mut result = self.term();
+    fn expr(&mut self) -> Box<dyn Ast<'a> + 'a> {
+        let mut node = self.term();
+        let mut current_token = Token {
+            kind: self.current_token.kind.clone(),
+            value: self.current_token.value.clone(),
+        };
 
         while [TokenKind::Plus, TokenKind::Minus].contains(&self.current_token.kind) {
             if self.current_token.kind == TokenKind::Plus {
                 self.eat(TokenKind::Plus).unwrap();
-                result += self.term();
             } else {
                 self.eat(TokenKind::Minus).unwrap();
-                result -= self.term();
             }
+
+            node = Box::new(BinOp::new(node, current_token, self.term()));
+            current_token = Token {
+                kind: self.current_token.kind.clone(),
+                value: self.current_token.value.clone(),
+            };
         }
 
-        result
+        node
     }
 
-    pub fn exec(&mut self) -> i32 {
+    pub fn parse(&'a mut self) -> Box<dyn Ast<'a> + 'a> {
         self.eat(TokenKind::Root).unwrap();
 
         self.expr()
+    }
+}
+
+// /////////////////////////////////////////////////////////// //
+// INTERPRETER                                                 //
+// /////////////////////////////////////////////////////////// //
+
+pub struct Interpreter {}
+
+impl Default for Interpreter {
+    fn default() -> Self {
+        Interpreter::new()
+    }
+}
+
+impl<'a> Interpreter {
+    pub fn new() -> Self {
+        Interpreter {}
+    }
+
+    fn visit(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+        match node.node() {
+            Node::Num => self.visit_num(node),
+            Node::BinOp => self.visit_bin_op(node),
+        }
+    }
+
+    fn visit_bin_op(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+        let childrens = node.children();
+        match node.token().kind {
+            TokenKind::Plus => self.visit(childrens[0]) + self.visit(childrens[1]),
+            TokenKind::Minus => self.visit(childrens[0]) - self.visit(childrens[1]),
+            TokenKind::Mul => self.visit(childrens[0]) * self.visit(childrens[1]),
+            TokenKind::Div => self.visit(childrens[0]) / self.visit(childrens[1]),
+            _ => panic!("Invalid op. Op: {:?}", node.token()),
+        }
+    }
+
+    fn visit_num(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+        node.value().unwrap().parse::<i32>().unwrap()
+    }
+
+    pub fn interpret(&self, tree: &(dyn Ast<'a> + 'a)) -> i32 {
+        self.visit(tree)
     }
 }

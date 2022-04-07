@@ -25,7 +25,7 @@ fn main() {
 
         let lexer = Lexer::new(&input);
         let mut interpreter = Interpreter::new(lexer);
-        let result = interpreter.expr();
+        let result = interpreter.exec();
 
         println!("{}", result);
     }

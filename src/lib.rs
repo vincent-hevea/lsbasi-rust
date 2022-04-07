@@ -8,6 +8,8 @@ enum TokenKind {
     Minus,
     Mul,
     Div,
+    Lparen,
+    Rparen,
     Root,
     Eof,
 }
@@ -93,6 +95,16 @@ impl<'a> Lexer<'a> {
                 return Token::new(TokenKind::Div, Some(current_char.to_string()));
             }
 
+            if current_char == '(' {
+                self.advance();
+                return Token::new(TokenKind::Lparen, Some(current_char.to_string()));
+            }
+
+            if current_char == ')' {
+                self.advance();
+                return Token::new(TokenKind::Rparen, Some(current_char.to_string()));
+            }
+
             panic!("Invalid character. Character: {}", current_char);
         }
 
@@ -130,9 +142,16 @@ impl<'a> Interpreter<'a> {
             self.current_token.kind.clone(),
             self.current_token.value.clone(),
         );
-        self.eat(TokenKind::Integer).unwrap();
 
-        token.value.as_ref().unwrap().parse::<i32>().unwrap()
+        if self.current_token.kind == TokenKind::Integer {
+            self.eat(TokenKind::Integer).unwrap();
+            token.value.as_ref().unwrap().parse::<i32>().unwrap()
+        } else {
+            self.eat(TokenKind::Lparen).unwrap();
+            let result = self.expr();
+            self.eat(TokenKind::Rparen).unwrap();
+            result
+        }
     }
 
     fn term(&mut self) -> i32 {
@@ -151,9 +170,7 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    pub fn expr(&mut self) -> i32 {
-        self.eat(TokenKind::Root).unwrap();
-
+    fn expr(&mut self) -> i32 {
         let mut result = self.term();
 
         while [TokenKind::Plus, TokenKind::Minus].contains(&self.current_token.kind) {
@@ -167,5 +184,11 @@ impl<'a> Interpreter<'a> {
         }
 
         result
+    }
+
+    pub fn exec(&mut self) -> i32 {
+        self.eat(TokenKind::Root).unwrap();
+
+        self.expr()
     }
 }

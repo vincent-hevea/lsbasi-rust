@@ -4,6 +4,8 @@ use std::str::Chars;
 #[derive(PartialEq, Clone, Debug)]
 enum TokenKind {
     Integer,
+    Plus,
+    Minus,
     Mul,
     Div,
     Root,
@@ -71,6 +73,16 @@ impl<'a> Lexer<'a> {
                 return Token::new(TokenKind::Integer, Some(self.integer()));
             }
 
+            if current_char == '+' {
+                self.advance();
+                return Token::new(TokenKind::Plus, Some(current_char.to_string()));
+            }
+
+            if current_char == '-' {
+                self.advance();
+                return Token::new(TokenKind::Minus, Some(current_char.to_string()));
+            }
+
             if current_char == '*' {
                 self.advance();
                 return Token::new(TokenKind::Mul, Some(current_char.to_string()));
@@ -123,9 +135,7 @@ impl<'a> Interpreter<'a> {
         token.value.as_ref().unwrap().parse::<i32>().unwrap()
     }
 
-    pub fn expr(&mut self) -> i32 {
-        self.eat(TokenKind::Root).unwrap();
-
+    fn term(&mut self) -> i32 {
         let mut result = self.factor();
 
         while [TokenKind::Mul, TokenKind::Div].contains(&self.current_token.kind) {
@@ -135,6 +145,24 @@ impl<'a> Interpreter<'a> {
             } else {
                 self.eat(TokenKind::Div).unwrap();
                 result /= self.factor();
+            }
+        }
+
+        result
+    }
+
+    pub fn expr(&mut self) -> i32 {
+        self.eat(TokenKind::Root).unwrap();
+
+        let mut result = self.term();
+
+        while [TokenKind::Plus, TokenKind::Minus].contains(&self.current_token.kind) {
+            if self.current_token.kind == TokenKind::Plus {
+                self.eat(TokenKind::Plus).unwrap();
+                result += self.term();
+            } else {
+                self.eat(TokenKind::Minus).unwrap();
+                result -= self.term();
             }
         }
 

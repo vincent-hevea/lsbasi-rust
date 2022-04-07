@@ -35,6 +35,9 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    // /////////////////////////////////////////////////////////// //
+    // Lexer code                                                  //
+    // /////////////////////////////////////////////////////////// //
     fn advance(&mut self) {
         self.stream.next();
     }
@@ -92,6 +95,9 @@ impl<'a> Interpreter<'a> {
         Token::new(TokenKind::Eof, None)
     }
 
+    // /////////////////////////////////////////////////////////// //
+    // Parser / Interpreter code                                   //
+    // /////////////////////////////////////////////////////////// //
     fn eat(&mut self, token_kind: TokenKind) -> Result<(), String> {
         if self.current_token.kind == token_kind {
             self.current_token = self.get_next_token();
@@ -104,39 +110,32 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn term(&mut self) -> i32 {
+        let token = Token::new(
+            self.current_token.kind.clone(),
+            self.current_token.value.clone(),
+        );
+        self.eat(TokenKind::Integer).unwrap();
+
+        token.value.as_ref().unwrap().parse::<i32>().unwrap()
+    }
+
     /// Parser / Interpreter
     pub fn expr(&mut self) -> i32 {
         self.eat(TokenKind::Root).unwrap();
 
-        let token_left = Token::new(
-            self.current_token.kind.clone(),
-            self.current_token.value.clone(),
-        );
-        self.eat(TokenKind::Integer).unwrap();
+        let mut result = self.term();
 
-        let token_op = Token::new(
-            self.current_token.kind.clone(),
-            self.current_token.value.clone(),
-        );
-
-        if token_op.kind == TokenKind::Plus {
-            self.eat(TokenKind::Plus).unwrap();
-        } else {
-            self.eat(TokenKind::Minus).unwrap();
+        while [TokenKind::Plus, TokenKind::Minus].contains(&self.current_token.kind) {
+            if self.current_token.kind == TokenKind::Plus {
+                self.eat(TokenKind::Plus).unwrap();
+                result += self.term();
+            } else {
+                self.eat(TokenKind::Minus).unwrap();
+                result -= self.term();
+            }
         }
 
-        let token_right = Token::new(
-            self.current_token.kind.clone(),
-            self.current_token.value.clone(),
-        );
-        self.eat(TokenKind::Integer).unwrap();
-
-        if token_op.kind == TokenKind::Plus {
-            token_left.value.as_ref().unwrap().parse::<i32>().unwrap()
-                + token_right.value.as_ref().unwrap().parse::<i32>().unwrap()
-        } else {
-            token_left.value.as_ref().unwrap().parse::<i32>().unwrap()
-                - token_right.value.as_ref().unwrap().parse::<i32>().unwrap()
-        }
+        result
     }
 }

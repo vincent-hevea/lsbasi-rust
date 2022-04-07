@@ -4,8 +4,8 @@ use std::str::Chars;
 #[derive(PartialEq, Clone, Debug)]
 enum TokenKind {
     Integer,
-    Plus,
-    Minus,
+    Mul,
+    Div,
     Root,
     Eof,
 }
@@ -22,22 +22,17 @@ impl Token {
     }
 }
 
-pub struct Interpreter<'a> {
+pub struct Lexer<'a> {
     stream: Peekable<Chars<'a>>,
-    current_token: Token,
 }
 
-impl<'a> Interpreter<'a> {
+impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Interpreter {
+        Lexer {
             stream: input.chars().peekable(),
-            current_token: Token::new(TokenKind::Root, None),
         }
     }
 
-    // /////////////////////////////////////////////////////////// //
-    // Lexer code                                                  //
-    // /////////////////////////////////////////////////////////// //
     fn advance(&mut self) {
         self.stream.next();
     }
@@ -65,9 +60,6 @@ impl<'a> Interpreter<'a> {
         c_integer
     }
 
-    /// Lexical analyzer (also known as scanner or tokenizer)
-    ///
-    /// This method is responsible for breaking a sentence apart into tokens.
     fn get_next_token(&mut self) -> Token {
         while let Some(current_char) = self.stream.peek().copied() {
             if current_char.is_whitespace() {
@@ -79,14 +71,14 @@ impl<'a> Interpreter<'a> {
                 return Token::new(TokenKind::Integer, Some(self.integer()));
             }
 
-            if current_char == '+' {
+            if current_char == '*' {
                 self.advance();
-                return Token::new(TokenKind::Plus, Some(current_char.to_string()));
+                return Token::new(TokenKind::Mul, Some(current_char.to_string()));
             }
 
-            if current_char == '-' {
+            if current_char == '/' {
                 self.advance();
-                return Token::new(TokenKind::Minus, Some(current_char.to_string()));
+                return Token::new(TokenKind::Div, Some(current_char.to_string()));
             }
 
             panic!("Invalid character. Character: {}", current_char);
@@ -94,13 +86,24 @@ impl<'a> Interpreter<'a> {
 
         Token::new(TokenKind::Eof, None)
     }
+}
 
-    // /////////////////////////////////////////////////////////// //
-    // Parser / Interpreter code                                   //
-    // /////////////////////////////////////////////////////////// //
+pub struct Interpreter<'a> {
+    lexer: Lexer<'a>,
+    current_token: Token,
+}
+
+impl<'a> Interpreter<'a> {
+    pub fn new(lexer: Lexer<'a>) -> Self {
+        Interpreter {
+            lexer,
+            current_token: Token::new(TokenKind::Root, None),
+        }
+    }
+
     fn eat(&mut self, token_kind: TokenKind) -> Result<(), String> {
         if self.current_token.kind == token_kind {
-            self.current_token = self.get_next_token();
+            self.current_token = self.lexer.get_next_token();
             Ok(())
         } else {
             Err(format!(
@@ -110,7 +113,7 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn term(&mut self) -> i32 {
+    fn factor(&mut self) -> i32 {
         let token = Token::new(
             self.current_token.kind.clone(),
             self.current_token.value.clone(),
@@ -120,19 +123,18 @@ impl<'a> Interpreter<'a> {
         token.value.as_ref().unwrap().parse::<i32>().unwrap()
     }
 
-    /// Parser / Interpreter
     pub fn expr(&mut self) -> i32 {
         self.eat(TokenKind::Root).unwrap();
 
-        let mut result = self.term();
+        let mut result = self.factor();
 
-        while [TokenKind::Plus, TokenKind::Minus].contains(&self.current_token.kind) {
-            if self.current_token.kind == TokenKind::Plus {
-                self.eat(TokenKind::Plus).unwrap();
-                result += self.term();
+        while [TokenKind::Mul, TokenKind::Div].contains(&self.current_token.kind) {
+            if self.current_token.kind == TokenKind::Mul {
+                self.eat(TokenKind::Mul).unwrap();
+                result *= self.factor();
             } else {
-                self.eat(TokenKind::Minus).unwrap();
-                result -= self.term();
+                self.eat(TokenKind::Div).unwrap();
+                result /= self.factor();
             }
         }
 

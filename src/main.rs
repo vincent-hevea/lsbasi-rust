@@ -1,4 +1,4 @@
-use lsbasi_rust::Interpreter;
+use lsbasi_rust::{Interpreter, Lexer};
 use std::io;
 use std::io::Write;
 
@@ -23,7 +23,8 @@ fn main() {
             break;
         }
 
-        let mut interpreter = Interpreter::new(&input);
+        let lexer = Lexer::new(&input);
+        let mut interpreter = Interpreter::new(lexer);
         let result = interpreter.expr();
 
         println!("{}", result);

@@ -1,6 +1,8 @@
 use std::iter::Peekable;
 use std::str::Chars;
 
+type NodeType<'a> = dyn Ast<'a> + 'a;
+
 // /////////////////////////////////////////////////////////// //
 // LEXER                                                       //
 // /////////////////////////////////////////////////////////// //
@@ -124,19 +126,20 @@ impl<'a> Lexer<'a> {
 pub enum Node {
     BinOp,
     Num,
+    UnaryOp,
 }
 
 pub trait Ast<'a> {
     fn node(&self) -> Node;
     fn token(&self) -> &Token;
     fn value(&self) -> Option<&str>;
-    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)>;
+    fn children(&self) -> Vec<&NodeType<'a>>;
 }
 
 struct BinOp<'a> {
     token: Token,
-    left: Box<dyn Ast<'a> + 'a>,
-    right: Box<dyn Ast<'a> + 'a>,
+    left: Box<NodeType<'a>>,
+    right: Box<NodeType<'a>>,
 }
 
 struct Num {
@@ -144,8 +147,13 @@ struct Num {
     value: String,
 }
 
+struct UnaryOp<'a> {
+    token: Token,
+    expr: Box<NodeType<'a>>,
+}
+
 impl<'a> BinOp<'a> {
-    fn new(left: Box<dyn Ast<'a> + 'a>, token: Token, right: Box<dyn Ast<'a> + 'a>) -> Self {
+    fn new(left: Box<NodeType<'a>>, token: Token, right: Box<NodeType<'a>>) -> Self {
         BinOp { token, left, right }
     }
 }
@@ -163,7 +171,7 @@ impl<'a> Ast<'a> for BinOp<'a> {
         None
     }
 
-    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)> {
+    fn children(&self) -> Vec<&NodeType<'a>> {
         vec![&*self.left, &*self.right]
     }
 }
@@ -185,8 +193,32 @@ impl<'a> Ast<'a> for Num {
     fn value(&self) -> Option<&str> {
         Some(&self.value)
     }
-    fn children(&self) -> Vec<&(dyn Ast<'a> + 'a)> {
+    fn children(&self) -> Vec<&NodeType<'a>> {
         vec![]
+    }
+}
+
+impl<'a> UnaryOp<'a> {
+    fn new(token: Token, expr: Box<NodeType<'a>>) -> Self {
+        UnaryOp { token, expr }
+    }
+}
+
+impl<'a> Ast<'a> for UnaryOp<'a> {
+    fn node(&self) -> Node {
+        Node::UnaryOp
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn value(&self) -> Option<&str> {
+        None
+    }
+
+    fn children(&self) -> Vec<&NodeType<'a>> {
+        vec![&*self.expr]
     }
 }
 
@@ -215,24 +247,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn factor(&mut self) -> Box<dyn Ast<'a> + 'a> {
+    fn factor(&mut self) -> Box<NodeType<'a>> {
         let token = Token::new(
             self.current_token.kind.clone(),
             self.current_token.value.clone(),
         );
 
-        if self.current_token.kind == TokenKind::Integer {
-            self.eat(TokenKind::Integer).unwrap();
-            Box::new(Num::new(token))
-        } else {
-            self.eat(TokenKind::Lparen).unwrap();
-            let node = self.expr();
-            self.eat(TokenKind::Rparen).unwrap();
-            node
+        match self.current_token.kind {
+            TokenKind::Integer => {
+                self.eat(TokenKind::Integer).unwrap();
+                Box::new(Num::new(token))
+            }
+            TokenKind::Lparen => {
+                self.eat(TokenKind::Lparen).unwrap();
+                let node = self.expr();
+                self.eat(TokenKind::Rparen).unwrap();
+                node
+            }
+            TokenKind::Plus => {
+                self.eat(TokenKind::Plus).unwrap();
+                Box::new(UnaryOp::new(token, self.factor()))
+            }
+            TokenKind::Minus => {
+                self.eat(TokenKind::Minus).unwrap();
+                Box::new(UnaryOp::new(token, self.factor()))
+            }
+            _ => panic!("Invalid token. Token: {:?}", self.current_token),
         }
     }
 
-    fn term(&mut self) -> Box<dyn Ast<'a> + 'a> {
+    fn term(&mut self) -> Box<NodeType<'a>> {
         let mut node = self.factor();
         let mut current_token = Token {
             kind: self.current_token.kind.clone(),
@@ -255,7 +299,7 @@ impl<'a> Parser<'a> {
         node
     }
 
-    fn expr(&mut self) -> Box<dyn Ast<'a> + 'a> {
+    fn expr(&mut self) -> Box<NodeType<'a>> {
         let mut node = self.term();
         let mut current_token = Token {
             kind: self.current_token.kind.clone(),
@@ -279,7 +323,7 @@ impl<'a> Parser<'a> {
         node
     }
 
-    pub fn parse(&'a mut self) -> Box<dyn Ast<'a> + 'a> {
+    pub fn parse(&'a mut self) -> Box<NodeType<'a>> {
         self.eat(TokenKind::Root).unwrap();
 
         self.expr()
@@ -303,14 +347,15 @@ impl<'a> Interpreter {
         Interpreter {}
     }
 
-    fn visit(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+    fn visit(&self, node: &NodeType<'a>) -> i32 {
         match node.node() {
             Node::Num => self.visit_num(node),
             Node::BinOp => self.visit_bin_op(node),
+            Node::UnaryOp => self.visit_unary_op(node),
         }
     }
 
-    fn visit_bin_op(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+    fn visit_bin_op(&self, node: &NodeType<'a>) -> i32 {
         let childrens = node.children();
         match node.token().kind {
             TokenKind::Plus => self.visit(childrens[0]) + self.visit(childrens[1]),
@@ -321,11 +366,19 @@ impl<'a> Interpreter {
         }
     }
 
-    fn visit_num(&self, node: &(dyn Ast<'a> + 'a)) -> i32 {
+    fn visit_num(&self, node: &NodeType<'a>) -> i32 {
         node.value().unwrap().parse::<i32>().unwrap()
     }
 
-    pub fn interpret(&self, tree: &(dyn Ast<'a> + 'a)) -> i32 {
+    fn visit_unary_op(&self, node: &NodeType<'a>) -> i32 {
+        match node.token().kind {
+            TokenKind::Plus => self.visit(node.children()[0]),
+            TokenKind::Minus => -self.visit(node.children()[0]),
+            _ => panic!("Invalid op. Op: {:?}", node.token()),
+        }
+    }
+
+    pub fn interpret(&self, tree: &NodeType<'a>) -> i32 {
         self.visit(tree)
     }
 }

@@ -1,34 +1,14 @@
 use lsbasi_rust::{Interpreter, Lexer, Parser};
-use std::io;
-use std::io::Write;
+use std::fs;
 
 fn main() {
-    loop {
-        print!("calc> ");
-        io::stdout().flush().unwrap();
+    let input = fs::read_to_string("prg.pas").expect("Something went wrong reading the file");
 
-        let mut input = String::new();
+    let mut lexer = Lexer::new(&input);
+    let mut parser = Parser::new(&mut lexer);
+    let tree = parser.parse();
+    let mut interpreter = Interpreter::new();
+    interpreter.interpret(&*tree);
 
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Failed to read line");
-
-        let input: String = match input.trim().parse() {
-            Ok(input_ok) => input_ok,
-            Err(_) => continue,
-        };
-
-        if input.is_empty() {
-            println!("Bye");
-            break;
-        }
-
-        let mut lexer = Lexer::new(&input);
-        let mut parser = Parser::new(&mut lexer);
-        let tree = parser.parse();
-        let interpreter = Interpreter::new();
-        let result = interpreter.interpret(&*tree);
-
-        println!("{}", result);
-    }
+    println!("{:?}", interpreter.global_scope);
 }

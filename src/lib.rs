@@ -63,9 +63,12 @@ impl<'a> Lexer<'a> {
         reserved_keywords.insert(String::from("DIV"), Token::new(TokenKind::IntegerDiv, None));
         reserved_keywords.insert(
             String::from("INTEGER"),
-            Token::new(TokenKind::Integer, None),
+            Token::new(TokenKind::Integer, Some(String::from("INTEGER"))),
         );
-        reserved_keywords.insert(String::from("REAL"), Token::new(TokenKind::Real, None));
+        reserved_keywords.insert(
+            String::from("REAL"),
+            Token::new(TokenKind::Real, Some(String::from("REAL"))),
+        );
         reserved_keywords.insert(String::from("BEGIN"), Token::new(TokenKind::Begin, None));
         reserved_keywords.insert(String::from("END"), Token::new(TokenKind::End, None));
         Lexer {
@@ -298,6 +301,7 @@ struct VarDecl<'a> {
 
 struct Type {
     token: Token,
+    value: String,
 }
 
 impl<'a> BinOp<'a> {
@@ -550,7 +554,8 @@ impl<'a> Ast<'a> for VarDecl<'a> {
 
 impl Type {
     fn new(token: Token) -> Self {
-        Type { token }
+        let value = token.value.clone().unwrap();
+        Type { token, value }
     }
 }
 
@@ -562,7 +567,7 @@ impl<'a> Ast<'a> for Type {
         Some(&self.token)
     }
     fn value(&self) -> Option<&str> {
-        None
+        Some(&self.value)
     }
     fn children(&self) -> Vec<&NodeType<'a>> {
         vec![]
@@ -780,6 +785,153 @@ impl<'a> Parser<'a> {
 
         node
     }
+}
+
+// /////////////////////////////////////////////////////////// //
+// SYMBOLS and SYMBOL TABLE                                    //
+// /////////////////////////////////////////////////////////// //
+
+#[derive(Debug)]
+enum SymbolCategory {
+    Var,
+}
+
+#[derive(Debug)]
+struct Symbol {
+    name: String,
+    kind: Option<String>,
+    category: SymbolCategory,
+}
+
+impl Symbol {
+    fn new(name: String, kind: Option<String>, category: SymbolCategory) -> Self {
+        Symbol {
+            name,
+            kind,
+            category,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SymbolTable {
+    symbols: HashMap<String, Symbol>,
+}
+
+impl SymbolTable {
+    fn new() -> Self {
+        SymbolTable {
+            symbols: HashMap::new(),
+        }
+    }
+
+    fn define(&mut self, symbol: Symbol) {
+        self.symbols.insert(symbol.name.clone(), symbol);
+    }
+
+    fn lookup(&self, name: &str) -> Option<&Symbol> {
+        self.symbols.get(name)
+    }
+}
+
+pub struct SymbolTableBuilder {
+    pub sym_tab: SymbolTable,
+}
+
+impl<'a> SymbolTableBuilder {
+    pub fn new() -> Self {
+        SymbolTableBuilder {
+            sym_tab: SymbolTable::new(),
+        }
+    }
+
+    pub fn visit(&mut self, node: &NodeType<'a>) {
+        match node.node() {
+            Node::Compound => self.visit_compound(node),
+            Node::Assign => self.visit_assign(node),
+            Node::NoOp => self.visit_no_op(),
+            Node::Program => self.visit_program(node),
+            Node::Block => self.visit_block(node),
+            Node::VarDecl => self.visit_var_decl(node),
+            Node::Type => self.visit_type(),
+            Node::Num => self.visit_num(),
+            Node::BinOp => self.visit_bin_op(node),
+            Node::UnaryOp => self.visit_unary_op(node),
+            Node::Var => self.visit_var(node),
+        };
+    }
+
+    fn visit_program(&mut self, node: &NodeType<'a>) {
+        self.visit(node.children()[0])
+    }
+
+    fn visit_block(&mut self, node: &NodeType<'a>) {
+        node.children()
+            .into_iter()
+            .for_each(|node_elt| self.visit(node_elt));
+    }
+
+    fn visit_var_decl(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        let symbol_name = String::from(children[0].value().unwrap());
+        let node_type = children[1].value().unwrap();
+
+        self.sym_tab.define(Symbol::new(
+            symbol_name,
+            Some(node_type.to_string()),
+            SymbolCategory::Var,
+        ));
+    }
+
+    fn visit_type(&self) {}
+
+    fn visit_bin_op(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        self.visit(children[0]);
+        self.visit(children[1]);
+    }
+
+    fn visit_num(&self) {}
+
+    fn visit_unary_op(&mut self, node: &NodeType<'a>) {
+        self.visit(node.children()[0])
+    }
+
+    fn visit_compound(&mut self, node: &NodeType<'a>) {
+        for children in node.children() {
+            self.visit(children);
+        }
+    }
+
+    fn visit_assign(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        if self
+            .sym_tab
+            .lookup(children[0].token().unwrap().value.as_ref().unwrap())
+            .is_none()
+        {
+            panic!(
+                "Not in SymbolTable: {}",
+                children[0].token().unwrap().value.as_ref().unwrap()
+            )
+        }
+        self.visit(children[1]);
+    }
+
+    fn visit_var(&self, node: &NodeType<'a>) {
+        if self
+            .sym_tab
+            .lookup(node.token().unwrap().value.as_ref().unwrap())
+            .is_none()
+        {
+            panic!(
+                "Not in SymbolTable: {}",
+                node.token().unwrap().value.as_ref().unwrap()
+            )
+        }
+    }
+
+    fn visit_no_op(&self) {}
 }
 
 // /////////////////////////////////////////////////////////// //

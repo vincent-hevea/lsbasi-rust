@@ -22,6 +22,7 @@ enum TokenKind {
     Lparen,
     Rparen,
     Program,
+    Procedure,
     Var,
     Id,
     Assign,
@@ -60,6 +61,10 @@ impl<'a> Lexer<'a> {
             Token::new(TokenKind::Program, None),
         );
         reserved_keywords.insert(String::from("VAR"), Token::new(TokenKind::Var, None));
+        reserved_keywords.insert(
+            String::from("PROCEDURE"),
+            Token::new(TokenKind::Procedure, None),
+        );
         reserved_keywords.insert(String::from("DIV"), Token::new(TokenKind::IntegerDiv, None));
         reserved_keywords.insert(
             String::from("INTEGER"),
@@ -235,6 +240,7 @@ pub enum Node {
     Num,
     UnaryOp,
     Program,
+    Procedure,
     Block,
     Compound,
     Assign,
@@ -302,6 +308,11 @@ struct VarDecl<'a> {
 struct Type {
     token: Token,
     value: String,
+}
+
+struct ProcedureDecl<'a> {
+    name: String,
+    block: Box<NodeType<'a>>,
 }
 
 impl<'a> BinOp<'a> {
@@ -574,6 +585,30 @@ impl<'a> Ast<'a> for Type {
     }
 }
 
+impl<'a> ProcedureDecl<'a> {
+    fn new(name: String, block: Box<NodeType<'a>>) -> Self {
+        ProcedureDecl { name, block }
+    }
+}
+
+impl<'a> Ast<'a> for ProcedureDecl<'a> {
+    fn node(&self) -> Node {
+        Node::Procedure
+    }
+
+    fn token(&self) -> Option<&Token> {
+        None
+    }
+
+    fn value(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn children(&self) -> Vec<&NodeType<'a>> {
+        vec![&*self.block]
+    }
+}
+
 pub struct Parser<'a> {
     lexer: &'a mut Lexer<'a>,
     current_token: Token,
@@ -621,6 +656,15 @@ impl<'a> Parser<'a> {
                 declarations.append(&mut self.variable_declaration());
                 self.eat(TokenKind::Semi).unwrap();
             }
+        }
+        while self.current_token.kind == TokenKind::Procedure {
+            self.eat(TokenKind::Procedure).unwrap();
+            let proc_name = self.current_token.value.clone().unwrap();
+            self.eat(TokenKind::Id).unwrap();
+            self.eat(TokenKind::Semi).unwrap();
+            let block_node = self.block();
+            declarations.push(Box::new(ProcedureDecl::new(proc_name, block_node)));
+            self.eat(TokenKind::Semi).unwrap();
         }
 
         declarations
@@ -838,6 +882,12 @@ pub struct SymbolTableBuilder {
     pub sym_tab: SymbolTable,
 }
 
+impl<'a> Default for SymbolTableBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> SymbolTableBuilder {
     pub fn new() -> Self {
         SymbolTableBuilder {
@@ -858,6 +908,7 @@ impl<'a> SymbolTableBuilder {
             Node::BinOp => self.visit_bin_op(node),
             Node::UnaryOp => self.visit_unary_op(node),
             Node::Var => self.visit_var(node),
+            Node::Procedure => self.visit_procedure_decl(),
         };
     }
 
@@ -932,6 +983,8 @@ impl<'a> SymbolTableBuilder {
     }
 
     fn visit_no_op(&self) {}
+
+    fn visit_procedure_decl(&mut self) {}
 }
 
 // /////////////////////////////////////////////////////////// //
@@ -964,6 +1017,7 @@ impl<'a> Interpreter {
             Node::Block => self.visit_block(node),
             Node::VarDecl => self.visit_var_decl(),
             Node::Type => self.visit_type(),
+            Node::Procedure => self.visit_procedure_decl(),
             _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
@@ -1052,6 +1106,8 @@ impl<'a> Interpreter {
     }
 
     fn visit_no_op(&self) {}
+
+    fn visit_procedure_decl(&mut self) {}
 
     pub fn interpret(&mut self, tree: &NodeType<'a>) {
         self.visit(tree)

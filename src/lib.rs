@@ -139,7 +139,7 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        match self.reserved_keywords.get(&id) {
+        match self.reserved_keywords.get(&id.to_uppercase()) {
             None => Token::new(TokenKind::Id, Some(id)),
             Some(token) => Token::new(token.kind.clone(), token.value.clone()),
         }
@@ -832,7 +832,7 @@ impl<'a> Parser<'a> {
 }
 
 // /////////////////////////////////////////////////////////// //
-// SYMBOLS and SYMBOL TABLE                                    //
+// SYMBOLS, TABLES, SEMANTIC ANALYSIS                          //
 // /////////////////////////////////////////////////////////// //
 
 #[derive(Debug)]
@@ -878,19 +878,19 @@ impl SymbolTable {
     }
 }
 
-pub struct SymbolTableBuilder {
+pub struct SemanticAnalyzer {
     pub sym_tab: SymbolTable,
 }
 
-impl<'a> Default for SymbolTableBuilder {
+impl<'a> Default for SemanticAnalyzer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> SymbolTableBuilder {
+impl<'a> SemanticAnalyzer {
     pub fn new() -> Self {
-        SymbolTableBuilder {
+        SemanticAnalyzer {
             sym_tab: SymbolTable::new(),
         }
     }
@@ -927,6 +927,17 @@ impl<'a> SymbolTableBuilder {
         let symbol_name = String::from(children[0].value().unwrap());
         let node_type = children[1].value().unwrap();
 
+        if self
+            .sym_tab
+            .lookup(children[0].token().unwrap().value.as_ref().unwrap())
+            .is_some()
+        {
+            panic!(
+                "Duplicate identifier: {}",
+                children[0].token().unwrap().value.as_ref().unwrap()
+            )
+        }
+
         self.sym_tab.define(Symbol::new(
             symbol_name,
             Some(node_type.to_string()),
@@ -956,16 +967,7 @@ impl<'a> SymbolTableBuilder {
 
     fn visit_assign(&mut self, node: &NodeType<'a>) {
         let children = node.children();
-        if self
-            .sym_tab
-            .lookup(children[0].token().unwrap().value.as_ref().unwrap())
-            .is_none()
-        {
-            panic!(
-                "Not in SymbolTable: {}",
-                children[0].token().unwrap().value.as_ref().unwrap()
-            )
-        }
+        self.visit(children[0]);
         self.visit(children[1]);
     }
 

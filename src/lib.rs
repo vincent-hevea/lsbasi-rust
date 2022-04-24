@@ -234,13 +234,14 @@ impl<'a> Lexer<'a> {
 // PARSER                                                      //
 // /////////////////////////////////////////////////////////// //
 
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 pub enum Node {
     BinOp,
     Num,
     UnaryOp,
     Program,
     Procedure,
+    Params,
     Block,
     Compound,
     Assign,
@@ -310,8 +311,14 @@ struct Type {
     value: String,
 }
 
+struct Params<'a> {
+    var_node: Box<NodeType<'a>>,
+    type_node: Box<NodeType<'a>>,
+}
+
 struct ProcedureDecl<'a> {
     name: String,
+    params: Vec<Box<NodeType<'a>>>,
     block: Box<NodeType<'a>>,
 }
 
@@ -585,9 +592,40 @@ impl<'a> Ast<'a> for Type {
     }
 }
 
+impl<'a> Params<'a> {
+    fn new(var_node: Box<NodeType<'a>>, type_node: Box<NodeType<'a>>) -> Self {
+        Params {
+            var_node,
+            type_node,
+        }
+    }
+}
+
+impl<'a> Ast<'a> for Params<'a> {
+    fn node(&self) -> Node {
+        Node::Params
+    }
+
+    fn token(&self) -> Option<&Token> {
+        None
+    }
+
+    fn value(&self) -> Option<&str> {
+        None
+    }
+
+    fn children(&self) -> Vec<&NodeType<'a>> {
+        vec![&*self.var_node, &*self.type_node]
+    }
+}
+
 impl<'a> ProcedureDecl<'a> {
-    fn new(name: String, block: Box<NodeType<'a>>) -> Self {
-        ProcedureDecl { name, block }
+    fn new(name: String, params: Vec<Box<NodeType<'a>>>, block: Box<NodeType<'a>>) -> Self {
+        ProcedureDecl {
+            name,
+            params,
+            block,
+        }
     }
 }
 
@@ -605,7 +643,10 @@ impl<'a> Ast<'a> for ProcedureDecl<'a> {
     }
 
     fn children(&self) -> Vec<&NodeType<'a>> {
-        vec![&*self.block]
+        let mut children: Vec<&NodeType<'a>> = self.params.iter().map(|n| &**n).collect();
+        children.push(&*self.block);
+
+        children
     }
 }
 
@@ -650,7 +691,7 @@ impl<'a> Parser<'a> {
 
     fn declarations(&mut self) -> Vec<Box<NodeType<'a>>> {
         let mut declarations: Vec<Box<NodeType<'a>>> = Vec::new();
-        if self.current_token.kind == TokenKind::Var {
+        while self.current_token.kind == TokenKind::Var {
             self.eat(TokenKind::Var).unwrap();
             while self.current_token.kind == TokenKind::Id {
                 declarations.append(&mut self.variable_declaration());
@@ -661,13 +702,57 @@ impl<'a> Parser<'a> {
             self.eat(TokenKind::Procedure).unwrap();
             let proc_name = self.current_token.value.clone().unwrap();
             self.eat(TokenKind::Id).unwrap();
+            let mut params: Vec<Box<NodeType>> = Vec::new();
+            if self.current_token.kind == TokenKind::Lparen {
+                self.eat(TokenKind::Lparen).unwrap();
+                params = self.formal_parameter_list();
+                self.eat(TokenKind::Rparen).unwrap();
+            }
             self.eat(TokenKind::Semi).unwrap();
             let block_node = self.block();
-            declarations.push(Box::new(ProcedureDecl::new(proc_name, block_node)));
+            declarations.push(Box::new(ProcedureDecl::new(proc_name, params, block_node)));
             self.eat(TokenKind::Semi).unwrap();
         }
 
         declarations
+    }
+
+    fn formal_parameters(&mut self) -> Vec<Box<NodeType<'a>>> {
+        let mut tokens = vec![self.current_token.clone()];
+        self.eat(TokenKind::Id).unwrap();
+
+        while self.current_token.kind == TokenKind::Comma {
+            self.eat(TokenKind::Comma).unwrap();
+            tokens.push(self.current_token.clone());
+            self.eat(TokenKind::Id).unwrap();
+        }
+        self.eat(TokenKind::Colon).unwrap();
+        let type_node = self.type_spec();
+        let mut param_nodes: Vec<Box<NodeType<'a>>> = vec![];
+        let mut param_node: Box<NodeType<'a>>;
+        for token in tokens.into_iter() {
+            param_node = Box::new(Params::new(
+                Box::new(Var::new(token)),
+                Box::new(Type::new((*type_node).token().unwrap().clone())),
+            ));
+            param_nodes.push(param_node);
+        }
+
+        param_nodes
+    }
+
+    fn formal_parameter_list(&mut self) -> Vec<Box<NodeType<'a>>> {
+        if self.current_token.kind != TokenKind::Id {
+            return Vec::new();
+        }
+
+        let mut param_nodes = self.formal_parameters();
+        while self.current_token.kind == TokenKind::Semi {
+            self.eat(TokenKind::Semi).unwrap();
+            param_nodes.append(&mut self.formal_parameters());
+        }
+
+        param_nodes
     }
 
     fn variable_declaration(&mut self) -> Vec<Box<NodeType<'a>>> {
@@ -835,42 +920,80 @@ impl<'a> Parser<'a> {
 // SYMBOLS, TABLES, SEMANTIC ANALYSIS                          //
 // /////////////////////////////////////////////////////////// //
 
-#[derive(Debug)]
-enum SymbolCategory {
-    Var,
+#[derive(Debug, Clone)]
+enum KindSymbol {
+    Integer,
+    Real,
 }
 
 #[derive(Debug)]
-struct Symbol {
+struct VarSymbol {
     name: String,
-    kind: Option<String>,
-    category: SymbolCategory,
+    kind: KindSymbol,
 }
 
-impl Symbol {
-    fn new(name: String, kind: Option<String>, category: SymbolCategory) -> Self {
-        Symbol {
-            name,
-            kind,
-            category,
-        }
+impl VarSymbol {
+    fn new(name: String, kind: KindSymbol) -> Self {
+        VarSymbol { name, kind }
     }
 }
 
 #[derive(Debug)]
-pub struct SymbolTable {
-    symbols: HashMap<String, Symbol>,
+struct ProcedureSymbol {
+    name: String,
+    params: Vec<VarSymbol>,
 }
 
-impl SymbolTable {
-    fn new() -> Self {
-        SymbolTable {
-            symbols: HashMap::new(),
+impl ProcedureSymbol {
+    fn new(name: String, params: Vec<VarSymbol>) -> Self {
+        ProcedureSymbol { name, params }
+    }
+}
+
+#[derive(Debug)]
+enum Symbol {
+    Kind(KindSymbol),
+    Var(VarSymbol),
+    Procedure(ProcedureSymbol),
+}
+
+#[derive(Debug)]
+struct ScopedSymbolTable {
+    symbols: HashMap<String, Symbol>,
+    scope_name: String,
+    scope_level: i32,
+}
+
+impl ScopedSymbolTable {
+    fn new(scope_name: String, scope_level: i32) -> Self {
+        let mut symbols = HashMap::new();
+        symbols.insert("INTEGER".to_string(), Symbol::Kind(KindSymbol::Integer));
+        symbols.insert("REAL".to_string(), Symbol::Kind(KindSymbol::Real));
+        ScopedSymbolTable {
+            symbols,
+            scope_name,
+            scope_level,
         }
     }
 
-    fn define(&mut self, symbol: Symbol) {
-        self.symbols.insert(symbol.name.clone(), symbol);
+    fn insert(&mut self, symbol: Symbol) {
+        match symbol {
+            Symbol::Kind(matched_symbol) => match matched_symbol {
+                KindSymbol::Integer => self
+                    .symbols
+                    .insert("INTEGER".to_string(), Symbol::Kind(KindSymbol::Integer)),
+                KindSymbol::Real => self
+                    .symbols
+                    .insert("REAL".to_string(), Symbol::Kind(KindSymbol::Real)),
+            },
+            Symbol::Var(matched_symbol) => self
+                .symbols
+                .insert(matched_symbol.name.clone(), Symbol::Var(matched_symbol)),
+            Symbol::Procedure(matched_symbol) => self.symbols.insert(
+                matched_symbol.name.clone(),
+                Symbol::Procedure(matched_symbol),
+            ),
+        };
     }
 
     fn lookup(&self, name: &str) -> Option<&Symbol> {
@@ -878,8 +1001,33 @@ impl SymbolTable {
     }
 }
 
+#[derive(Debug)]
+pub struct ScopedSymbolTableStack {
+    stack: Vec<ScopedSymbolTable>,
+}
+
+impl ScopedSymbolTableStack {
+    fn new() -> Self {
+        ScopedSymbolTableStack { stack: Vec::new() }
+    }
+
+    fn lookup(&self, name: &str) -> Option<(&Symbol, i32)> {
+        for scope in self.stack.iter().rev() {
+            if let Some(symbol) = scope.lookup(name) {
+                return Some((symbol, scope.scope_level));
+            }
+        }
+
+        None
+    }
+
+    fn lookup_current_scope(&self, name: &str) -> Option<&Symbol> {
+        self.stack.last().and_then(|scope| scope.lookup(name))
+    }
+}
+
 pub struct SemanticAnalyzer {
-    pub sym_tab: SymbolTable,
+    pub scopes: ScopedSymbolTableStack,
 }
 
 impl<'a> Default for SemanticAnalyzer {
@@ -891,7 +1039,7 @@ impl<'a> Default for SemanticAnalyzer {
 impl<'a> SemanticAnalyzer {
     pub fn new() -> Self {
         SemanticAnalyzer {
-            sym_tab: SymbolTable::new(),
+            scopes: ScopedSymbolTableStack::new(),
         }
     }
 
@@ -908,12 +1056,18 @@ impl<'a> SemanticAnalyzer {
             Node::BinOp => self.visit_bin_op(node),
             Node::UnaryOp => self.visit_unary_op(node),
             Node::Var => self.visit_var(node),
-            Node::Procedure => self.visit_procedure_decl(),
+            Node::Procedure => self.visit_procedure_decl(node),
+            _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
 
     fn visit_program(&mut self, node: &NodeType<'a>) {
-        self.visit(node.children()[0])
+        self.scopes
+            .stack
+            .push(ScopedSymbolTable::new("global".to_string(), 1));
+        println!("{:#?}", self.scopes);
+        self.visit(node.children()[0]);
+        self.scopes.stack.pop();
     }
 
     fn visit_block(&mut self, node: &NodeType<'a>) {
@@ -926,10 +1080,12 @@ impl<'a> SemanticAnalyzer {
         let children = node.children();
         let symbol_name = String::from(children[0].value().unwrap());
         let node_type = children[1].value().unwrap();
+        let symbol = self.scopes.lookup(node_type).unwrap().0;
+        let symbol_type = self.symbol_type(symbol);
 
         if self
-            .sym_tab
-            .lookup(children[0].token().unwrap().value.as_ref().unwrap())
+            .scopes
+            .lookup_current_scope(children[0].token().unwrap().value.as_ref().unwrap())
             .is_some()
         {
             panic!(
@@ -938,11 +1094,12 @@ impl<'a> SemanticAnalyzer {
             )
         }
 
-        self.sym_tab.define(Symbol::new(
-            symbol_name,
-            Some(node_type.to_string()),
-            SymbolCategory::Var,
-        ));
+        self.scopes
+            .stack
+            .last_mut()
+            .unwrap()
+            .insert(Symbol::Var(VarSymbol::new(symbol_name, symbol_type)));
+        println!("{:#?}", self.scopes);
     }
 
     fn visit_type(&self) {}
@@ -972,21 +1129,277 @@ impl<'a> SemanticAnalyzer {
     }
 
     fn visit_var(&self, node: &NodeType<'a>) {
-        if self
-            .sym_tab
-            .lookup(node.token().unwrap().value.as_ref().unwrap())
-            .is_none()
-        {
-            panic!(
-                "Not in SymbolTable: {}",
-                node.token().unwrap().value.as_ref().unwrap()
-            )
+        if self.scopes.lookup(node.value().unwrap()).is_none() {
+            panic!("Not in SymbolTable: {}", node.value().unwrap())
         }
     }
 
     fn visit_no_op(&self) {}
 
-    fn visit_procedure_decl(&mut self) {}
+    fn visit_procedure_decl(&mut self, node: &NodeType<'a>) {
+        let mut procedure_symbol =
+            ProcedureSymbol::new(String::from(node.value().unwrap()), Vec::new());
+        let mut new_scope = ScopedSymbolTable::new(
+            String::from(node.value().unwrap()),
+            self.scopes.stack.len() as i32 + 1,
+        );
+        for child in node.children() {
+            if child.node() == Node::Params {
+                let symbol = self
+                    .scopes
+                    .lookup(child.children()[1].value().unwrap())
+                    .unwrap()
+                    .0;
+                let symbol_type = self.symbol_type(symbol);
+                new_scope.insert(Symbol::Var(VarSymbol::new(
+                    child.children()[0].value().unwrap().to_string(),
+                    symbol_type,
+                )));
+                let symbol_type = self.symbol_type(symbol);
+                procedure_symbol.params.push(VarSymbol::new(
+                    child.children()[0].value().unwrap().to_string(),
+                    symbol_type,
+                ));
+            }
+        }
+        self.scopes
+            .stack
+            .last_mut()
+            .unwrap()
+            .insert(Symbol::Procedure(procedure_symbol));
+        self.scopes.stack.push(new_scope);
+        println!("{:#?}", self.scopes);
+        self.visit(*node.children().last().unwrap());
+        self.scopes.stack.pop();
+        println!("{:#?}", self.scopes);
+    }
+
+    fn symbol_type(&self, symbol: &Symbol) -> KindSymbol {
+        match symbol {
+            Symbol::Kind(matched_symbol) => matched_symbol.clone(),
+            _ => panic!("No support for this Symbol: {:?}", symbol),
+        }
+    }
+}
+
+// /////////////////////////////////////////////////////////// //
+// SOURCE-TO-SOURCE COMPILER                                   //
+// /////////////////////////////////////////////////////////// //
+
+pub struct SourceToSourceCompiler {
+    scopes: ScopedSymbolTableStack,
+    output: String,
+}
+
+impl<'a> Default for SourceToSourceCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a> SourceToSourceCompiler {
+    pub fn new() -> Self {
+        SourceToSourceCompiler {
+            scopes: ScopedSymbolTableStack::new(),
+            output: String::new(),
+        }
+    }
+
+    pub fn output(&self) -> &str {
+        &self.output
+    }
+
+    pub fn visit(&mut self, node: &NodeType<'a>) {
+        match node.node() {
+            Node::Block => self.visit_block(node),
+            Node::Program => self.visit_program(node),
+            Node::Compound => self.visit_compound(node),
+            Node::NoOp => self.visit_no_op(),
+            Node::BinOp => self.visit_bin_op(node),
+            Node::Procedure => self.visit_procedure_decl(node),
+            Node::VarDecl => self.visit_var_decl(node),
+            Node::Assign => self.visit_assign(node),
+            Node::Var => self.visit_var(node),
+            _ => panic!("Invalid node. Node: {:?}", node.node()),
+        };
+    }
+
+    fn visit_block(&mut self, node: &NodeType<'a>) {
+        for child in node.children() {
+            if child.node() != Node::Compound {
+                self.visit(child)
+            }
+        }
+        self.output.push_str("\nbegin\n");
+        self.visit(*node.children().last().unwrap());
+        self.output.push_str("\nend");
+    }
+
+    fn visit_program(&mut self, node: &NodeType<'a>) {
+        self.output
+            .push_str(&format!("program {}0;\n", node.value().unwrap()));
+        self.scopes
+            .stack
+            .push(ScopedSymbolTable::new("global".to_string(), 1));
+        self.visit(node.children()[0]);
+        self.output.push('.');
+        self.output
+            .push_str(&format!(" {{END OF {}}}", node.value().unwrap()));
+        self.scopes.stack.pop();
+    }
+
+    fn visit_compound(&mut self, node: &NodeType<'a>) {
+        for children in node.children() {
+            self.visit(children);
+        }
+    }
+
+    fn visit_no_op(&self) {}
+
+    fn visit_bin_op(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        self.visit(children[0]);
+        let op_display = match node.token().unwrap().kind {
+            TokenKind::Plus => "+",
+            TokenKind::Minus => "-",
+            TokenKind::Mul => "*",
+            TokenKind::IntegerDiv => "DIV",
+            TokenKind::FloatDiv => "/",
+            _ => panic!("Invalid op. Op: {:?}", node.token()),
+        };
+        self.output.push_str(&format!(" {} ", op_display));
+        self.visit(children[1]);
+    }
+
+    fn visit_procedure_decl(&mut self, node: &NodeType<'a>) {
+        let mut procedure_symbol =
+            ProcedureSymbol::new(String::from(node.value().unwrap()), Vec::new());
+        let mut new_scope = ScopedSymbolTable::new(
+            String::from(node.value().unwrap()),
+            self.scopes.stack.len() as i32 + 1,
+        );
+        self.output.push_str(&format!(
+            "\nprocedure {}{}",
+            String::from(node.value().unwrap()),
+            self.scopes.stack.last().unwrap().scope_level
+        ));
+
+        let mut param_detected = false;
+        for child in node.children() {
+            if child.node() == Node::Params {
+                let mut sep = "; ";
+                if !param_detected {
+                    self.output.push('(');
+                    param_detected = true;
+                    sep = "";
+                }
+                self.output.push_str(sep);
+                let node_type = child.children()[1].value().unwrap();
+                let symbol_name = child.children()[0].value().unwrap();
+                let symbol = self.scopes.lookup(node_type).unwrap().0;
+                let symbol_type = self.symbol_type(symbol);
+                new_scope.insert(Symbol::Var(VarSymbol::new(
+                    child.children()[0].value().unwrap().to_string(),
+                    symbol_type,
+                )));
+                self.output.push_str(&format!(
+                    "{}{} : {}",
+                    symbol_name, new_scope.scope_level, node_type
+                ));
+                let symbol_type = self.symbol_type(symbol);
+                procedure_symbol.params.push(VarSymbol::new(
+                    child.children()[0].value().unwrap().to_string(),
+                    symbol_type,
+                ));
+            }
+        }
+        if param_detected {
+            self.output.push(')');
+        }
+        self.output.push(';');
+        self.output.push('\n');
+        self.scopes
+            .stack
+            .last_mut()
+            .unwrap()
+            .insert(Symbol::Procedure(procedure_symbol));
+        self.scopes.stack.push(new_scope);
+        self.visit(*node.children().last().unwrap());
+        self.output.push_str(&format!(
+            "; {{END OF {}}}\n",
+            String::from(node.value().unwrap())
+        ));
+        self.scopes.stack.pop();
+    }
+
+    fn visit_var_decl(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        let node_type = children[1].value().unwrap();
+        let symbol = self.scopes.lookup(node_type).unwrap().0;
+        let symbol_type = self.symbol_type(symbol);
+
+        if self
+            .scopes
+            .lookup_current_scope(children[0].token().unwrap().value.as_ref().unwrap())
+            .is_some()
+        {
+            panic!(
+                "Duplicate identifier: {}",
+                children[0].token().unwrap().value.as_ref().unwrap()
+            )
+        }
+
+        self.scopes
+            .stack
+            .last_mut()
+            .unwrap()
+            .insert(Symbol::Var(VarSymbol::new(
+                String::from(children[0].value().unwrap()),
+                symbol_type,
+            )));
+        self.output.push_str(&format!(
+            "var {}{} : {};\n",
+            String::from(children[0].value().unwrap()),
+            self.scopes.stack.last().unwrap().scope_level,
+            node_type
+        ));
+    }
+
+    fn visit_assign(&mut self, node: &NodeType<'a>) {
+        let children = node.children();
+        self.visit(children[0]);
+        self.output.push_str(" := ");
+        self.visit(children[1]);
+        self.output.push('\n');
+    }
+
+    fn visit_var(&mut self, node: &NodeType<'a>) {
+        if self.scopes.lookup(node.value().unwrap()).is_none() {
+            panic!("Not in SymbolTable: {}", node.value().unwrap())
+        }
+
+        let symbol_tuple = self.scopes.lookup(node.value().unwrap()).unwrap();
+        let symbol = match symbol_tuple.0 {
+            Symbol::Var(var) => var,
+            _ => panic!("Invalid symbol: {:?}", symbol_tuple.0),
+        };
+        self.output.push_str(&format!(
+            "<{}{}:{}>",
+            symbol.name,
+            symbol_tuple.1,
+            match symbol.kind {
+                KindSymbol::Integer => "INTEGER",
+                KindSymbol::Real => "REAL",
+            }
+        ));
+    }
+
+    fn symbol_type(&self, symbol: &Symbol) -> KindSymbol {
+        match symbol {
+            Symbol::Kind(matched_symbol) => matched_symbol.clone(),
+            _ => panic!("No support for this Symbol: {:?}", symbol),
+        }
+    }
 }
 
 // /////////////////////////////////////////////////////////// //
@@ -1098,10 +1511,7 @@ impl<'a> Interpreter {
     }
 
     fn visit_var(&self, node: &NodeType<'a>) -> f32 {
-        match self
-            .global_scope
-            .get(&(node.token().unwrap().value.clone().unwrap()))
-        {
+        match self.global_scope.get(node.value().unwrap()) {
             Some(var_value) => var_value.parse::<f32>().unwrap(),
             None => panic!("No Value for var {:?}", node.token()),
         }

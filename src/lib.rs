@@ -1,8 +1,76 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::iter::Peekable;
 use std::str::Chars;
 
 type NodeType<'a> = dyn Ast<'a> + 'a;
+
+// /////////////////////////////////////////////////////////// //
+// ERROR                                                       //
+// /////////////////////////////////////////////////////////// //
+
+#[derive(Debug)]
+enum ErrorKind {
+    UnexpectedCharacter,
+    InvalidNumber,
+    UnexpectedToken,
+    DuplicateId,
+    IdNotFound,
+}
+
+#[derive(Debug)]
+enum ErrorCategory {
+    Lexer,
+    Parser,
+    Semantic,
+}
+
+struct Error {
+    message: String,
+    kind: ErrorKind,
+    line: Option<i32>,
+    col: Option<i32>,
+    current_string: String,
+    category: ErrorCategory,
+}
+
+impl Error {
+    fn new(
+        message: String,
+        kind: ErrorKind,
+        line: Option<i32>,
+        col: Option<i32>,
+        current_string: String,
+        category: ErrorCategory,
+    ) -> Self {
+        Error {
+            message,
+            kind,
+            line,
+            col,
+            current_string,
+            category,
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let line = match self.line {
+            Some(matched_line) => matched_line.to_string(),
+            None => "No line".to_string(),
+        };
+        let col = match self.col {
+            Some(matched_col) => matched_col.to_string(),
+            None => "No Col".to_string(),
+        };
+        write!(
+            f,
+            "{:?} error on '{}' line: {} column: {} kind: {:?} message: {}",
+            self.category, self.current_string, line, col, self.kind, self.message
+        )
+    }
+}
 
 // /////////////////////////////////////////////////////////// //
 // LEXER                                                       //
@@ -39,18 +107,36 @@ enum TokenKind {
 #[derive(Clone, Debug)]
 pub struct Token {
     kind: TokenKind,
-    value: Option<String>,
+    value: String,
+    line: Option<i32>,
+    col: Option<i32>,
 }
 
 impl Token {
-    fn new(kind: TokenKind, value: Option<String>) -> Self {
-        Token { kind, value }
+    fn new(kind: TokenKind, value: String) -> Self {
+        Token {
+            kind,
+            value,
+            line: None,
+            col: None,
+        }
+    }
+
+    fn new_localized(kind: TokenKind, value: String, line: i32, col: i32) -> Token {
+        Token {
+            kind,
+            value,
+            line: Some(line),
+            col: Some(col),
+        }
     }
 }
 
 pub struct Lexer<'a> {
     stream: Peekable<Chars<'a>>,
     reserved_keywords: HashMap<String, Token>,
+    line: i32,
+    col: i32,
 }
 
 impl<'a> Lexer<'a> {
@@ -58,32 +144,54 @@ impl<'a> Lexer<'a> {
         let mut reserved_keywords = HashMap::new();
         reserved_keywords.insert(
             String::from("PROGRAM"),
-            Token::new(TokenKind::Program, None),
+            Token::new(TokenKind::Program, "PROGRAM".to_string()),
         );
-        reserved_keywords.insert(String::from("VAR"), Token::new(TokenKind::Var, None));
+        reserved_keywords.insert(
+            String::from("VAR"),
+            Token::new(TokenKind::Var, "VAR".to_string()),
+        );
         reserved_keywords.insert(
             String::from("PROCEDURE"),
-            Token::new(TokenKind::Procedure, None),
+            Token::new(TokenKind::Procedure, "PROCEDURE".to_string()),
         );
-        reserved_keywords.insert(String::from("DIV"), Token::new(TokenKind::IntegerDiv, None));
+        reserved_keywords.insert(
+            String::from("DIV"),
+            Token::new(TokenKind::IntegerDiv, "DIV".to_string()),
+        );
         reserved_keywords.insert(
             String::from("INTEGER"),
-            Token::new(TokenKind::Integer, Some(String::from("INTEGER"))),
+            Token::new(TokenKind::Integer, String::from("INTEGER")),
         );
         reserved_keywords.insert(
             String::from("REAL"),
-            Token::new(TokenKind::Real, Some(String::from("REAL"))),
+            Token::new(TokenKind::Real, String::from("REAL")),
         );
-        reserved_keywords.insert(String::from("BEGIN"), Token::new(TokenKind::Begin, None));
-        reserved_keywords.insert(String::from("END"), Token::new(TokenKind::End, None));
+        reserved_keywords.insert(
+            String::from("BEGIN"),
+            Token::new(TokenKind::Begin, "BEGIN".to_string()),
+        );
+        reserved_keywords.insert(
+            String::from("END"),
+            Token::new(TokenKind::End, "END".to_string()),
+        );
         Lexer {
             stream: input.chars().peekable(),
             reserved_keywords,
+            line: 1,
+            col: 1,
         }
     }
 
     fn advance(&mut self) {
         self.stream.next();
+        if let Some(current_char) = self.stream.peek() {
+            if *current_char == '\n' {
+                self.line += 1;
+                self.col = 0;
+            } else {
+                self.col += 1;
+            }
+        }
     }
 
     fn skip_whitespace(&mut self) {
@@ -108,10 +216,22 @@ impl<'a> Lexer<'a> {
     fn number(&mut self) -> Token {
         let mut number = String::new();
         let mut token_kind = TokenKind::IntegerConst;
+        let line = self.line;
+        let col = self.col;
 
         while let Some(current_char) = self.stream.peek().copied() {
             if current_char == '.' && number.matches('.').count() > 0 {
-                panic!("Invalid number");
+                panic!(
+                    "{}",
+                    Error::new(
+                        "Invalid number".to_string(),
+                        ErrorKind::InvalidNumber,
+                        Some(self.line),
+                        Some(self.col),
+                        current_char.to_string(),
+                        ErrorCategory::Lexer
+                    )
+                );
             }
             if current_char == '.' {
                 number.push('.');
@@ -126,10 +246,12 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        Token::new(token_kind, Some(number))
+        Token::new_localized(token_kind, number, line, col)
     }
 
     fn id(&mut self) -> Token {
+        let line = self.line;
+        let col = self.col;
         let mut id = String::new();
         while let Some(current_char) = self.stream.peek().copied() {
             if !current_char.is_alphanumeric() {
@@ -140,8 +262,8 @@ impl<'a> Lexer<'a> {
         }
 
         match self.reserved_keywords.get(&id.to_uppercase()) {
-            None => Token::new(TokenKind::Id, Some(id)),
-            Some(token) => Token::new(token.kind.clone(), token.value.clone()),
+            None => Token::new_localized(TokenKind::Id, id, line, col),
+            Some(token) => Token::new_localized(token.kind.clone(), token.value.clone(), line, col),
         }
     }
 
@@ -167,66 +289,92 @@ impl<'a> Lexer<'a> {
             }
 
             if current_char == ':' {
+                let line = self.line;
+                let col = self.col;
                 self.advance();
                 return match self.stream.peek().copied() {
                     Some(c) if c == '=' => {
                         self.advance();
-                        Token::new(TokenKind::Assign, None)
+                        Token::new_localized(TokenKind::Assign, ":=".to_string(), line, col)
                     }
-                    Some(_) => Token::new(TokenKind::Colon, None),
-                    None => panic!("Invalid character. Character: None"),
+                    Some(_) => Token::new_localized(TokenKind::Colon, ":".to_string(), line, col),
+                    None => panic!(
+                        "{}",
+                        Error::new(
+                            "Invalid character".to_string(),
+                            ErrorKind::UnexpectedCharacter,
+                            Some(line),
+                            Some(col),
+                            current_char.to_string(),
+                            ErrorCategory::Lexer
+                        )
+                    ),
                 };
             }
 
+            let mut simple_char_token_kind = None;
             if current_char == ',' {
-                self.advance();
-                return Token::new(TokenKind::Comma, None);
+                simple_char_token_kind = Some(TokenKind::Comma);
             }
 
             if current_char == ';' {
-                self.advance();
-                return Token::new(TokenKind::Semi, None);
+                simple_char_token_kind = Some(TokenKind::Semi);
             }
 
             if current_char == '+' {
-                self.advance();
-                return Token::new(TokenKind::Plus, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::Plus);
             }
 
             if current_char == '-' {
-                self.advance();
-                return Token::new(TokenKind::Minus, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::Minus);
             }
 
             if current_char == '*' {
-                self.advance();
-                return Token::new(TokenKind::Mul, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::Mul);
             }
 
             if current_char == '/' {
-                self.advance();
-                return Token::new(TokenKind::FloatDiv, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::FloatDiv);
             }
 
             if current_char == '(' {
-                self.advance();
-                return Token::new(TokenKind::Lparen, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::Lparen);
             }
 
             if current_char == ')' {
-                self.advance();
-                return Token::new(TokenKind::Rparen, Some(current_char.to_string()));
+                simple_char_token_kind = Some(TokenKind::Rparen);
             }
 
             if current_char == '.' {
-                self.advance();
-                return Token::new(TokenKind::Dot, None);
+                simple_char_token_kind = Some(TokenKind::Dot);
             }
 
-            panic!("Invalid character. Character: {}", current_char);
+            if let Some(token_kind) = simple_char_token_kind {
+                return self.simple_char_token(token_kind, current_char);
+            }
+
+            panic!(
+                "{}",
+                Error::new(
+                    "Invalid character".to_string(),
+                    ErrorKind::UnexpectedCharacter,
+                    Some(self.line),
+                    Some(self.col),
+                    current_char.to_string(),
+                    ErrorCategory::Lexer
+                )
+            );
         }
 
-        Token::new(TokenKind::Eof, None)
+        Token::new_localized(TokenKind::Eof, "".to_string(), self.line, self.col)
+    }
+
+    fn simple_char_token(&mut self, token_kind: TokenKind, current_char: char) -> Token {
+        let line = self.line;
+        let col = self.col;
+        self.advance();
+
+        Token::new_localized(token_kind, current_char.to_string(), line, col)
     }
 }
 
@@ -348,7 +496,7 @@ impl<'a> Ast<'a> for BinOp<'a> {
 
 impl Num {
     fn new(token: Token) -> Self {
-        let value = token.value.clone().unwrap();
+        let value = token.value.clone();
         Num { token, value }
     }
 }
@@ -442,7 +590,7 @@ impl<'a> Ast<'a> for Assign<'a> {
 
 impl Var {
     fn new(token: Token) -> Self {
-        let value = token.value.clone().unwrap();
+        let value = token.value.clone();
         Var { token, value }
     }
 }
@@ -572,7 +720,7 @@ impl<'a> Ast<'a> for VarDecl<'a> {
 
 impl Type {
     fn new(token: Token) -> Self {
-        let value = token.value.clone().unwrap();
+        let value = token.value.clone();
         Type { token, value }
     }
 }
@@ -659,7 +807,7 @@ impl<'a> Parser<'a> {
     pub fn new(lexer: &'a mut Lexer<'a>) -> Self {
         Parser {
             lexer,
-            current_token: Token::new(TokenKind::Root, None),
+            current_token: Token::new(TokenKind::Root, "".to_string()),
         }
     }
 
@@ -668,10 +816,19 @@ impl<'a> Parser<'a> {
             self.current_token = self.lexer.get_next_token();
             Ok(())
         } else {
-            Err(format!(
-                "Unable to eat. Expected token kind: {:?}. Actual token: {:?}",
-                token_kind, self.current_token
-            ))
+            let error_message = format!(
+                "Unable to eat. Expected token kind: {:?}. Actual token kind: {:?}",
+                token_kind, self.current_token.kind
+            );
+            Err(Error::new(
+                error_message,
+                ErrorKind::UnexpectedToken,
+                self.current_token.line,
+                self.current_token.col,
+                self.current_token.value.clone(),
+                ErrorCategory::Parser,
+            )
+            .to_string())
         }
     }
 
@@ -699,22 +856,28 @@ impl<'a> Parser<'a> {
             }
         }
         while self.current_token.kind == TokenKind::Procedure {
-            self.eat(TokenKind::Procedure).unwrap();
-            let proc_name = self.current_token.value.clone().unwrap();
-            self.eat(TokenKind::Id).unwrap();
-            let mut params: Vec<Box<NodeType>> = Vec::new();
-            if self.current_token.kind == TokenKind::Lparen {
-                self.eat(TokenKind::Lparen).unwrap();
-                params = self.formal_parameter_list();
-                self.eat(TokenKind::Rparen).unwrap();
-            }
-            self.eat(TokenKind::Semi).unwrap();
-            let block_node = self.block();
-            declarations.push(Box::new(ProcedureDecl::new(proc_name, params, block_node)));
-            self.eat(TokenKind::Semi).unwrap();
+            declarations.push(self.procedure_declaration());
         }
 
         declarations
+    }
+
+    fn procedure_declaration(&mut self) -> Box<NodeType<'a>> {
+        self.eat(TokenKind::Procedure).unwrap();
+        let proc_name = self.current_token.value.clone();
+        self.eat(TokenKind::Id).unwrap();
+        let mut params: Vec<Box<NodeType>> = Vec::new();
+        if self.current_token.kind == TokenKind::Lparen {
+            self.eat(TokenKind::Lparen).unwrap();
+            params = self.formal_parameter_list();
+            self.eat(TokenKind::Rparen).unwrap();
+        }
+        self.eat(TokenKind::Semi).unwrap();
+        let block_node = self.block();
+        let proc_decl = Box::new(ProcedureDecl::new(proc_name, params, block_node));
+        self.eat(TokenKind::Semi).unwrap();
+
+        proc_decl
     }
 
     fn formal_parameters(&mut self) -> Vec<Box<NodeType<'a>>> {
@@ -862,7 +1025,17 @@ impl<'a> Parser<'a> {
                 node
             }
             TokenKind::Id => self.variable(),
-            _ => panic!("Invalid token. Token: {:?}", self.current_token),
+            _ => panic!(
+                "{}",
+                Error::new(
+                    format!("Invalid token. Token kind: {:?}", self.current_token.kind),
+                    ErrorKind::UnexpectedToken,
+                    self.current_token.line,
+                    self.current_token.col,
+                    self.current_token.value.clone(),
+                    ErrorCategory::Parser
+                )
+            ),
         }
     }
 
@@ -877,7 +1050,17 @@ impl<'a> Parser<'a> {
                 TokenKind::Mul => self.eat(TokenKind::Mul).unwrap(),
                 TokenKind::IntegerDiv => self.eat(TokenKind::IntegerDiv).unwrap(),
                 TokenKind::FloatDiv => self.eat(TokenKind::FloatDiv).unwrap(),
-                _ => panic!("Invalid op: {:?}", current_token),
+                _ => panic!(
+                    "{}",
+                    Error::new(
+                        format!("Invalid token. Token kind: {:?}", self.current_token.kind),
+                        ErrorKind::UnexpectedToken,
+                        self.current_token.line,
+                        self.current_token.col,
+                        self.current_token.value.clone(),
+                        ErrorCategory::Parser
+                    )
+                ),
             }
 
             node = Box::new(BinOp::new(node, current_token, self.factor()));
@@ -909,7 +1092,17 @@ impl<'a> Parser<'a> {
         self.eat(TokenKind::Root).unwrap();
         let node = self.program();
         if self.current_token.kind != TokenKind::Eof {
-            panic!("Invalid token. Token: {:?}", self.current_token);
+            panic!(
+                "{}",
+                Error::new(
+                    format!("Invalid token. Token kind: {:?}", self.current_token.kind),
+                    ErrorKind::UnexpectedToken,
+                    self.current_token.line,
+                    self.current_token.col,
+                    self.current_token.value.clone(),
+                    ErrorCategory::Parser
+                )
+            );
         }
 
         node
@@ -1085,13 +1278,23 @@ impl<'a> SemanticAnalyzer {
 
         if self
             .scopes
-            .lookup_current_scope(children[0].token().unwrap().value.as_ref().unwrap())
+            .lookup_current_scope(children[0].token().unwrap().value.as_ref())
             .is_some()
         {
             panic!(
-                "Duplicate identifier: {}",
-                children[0].token().unwrap().value.as_ref().unwrap()
-            )
+                "{}",
+                Error::new(
+                    format!(
+                        "Duplicate identifier: {}",
+                        children[0].token().unwrap().value
+                    ),
+                    ErrorKind::DuplicateId,
+                    children[0].token().unwrap().line,
+                    children[0].token().unwrap().col,
+                    children[0].token().unwrap().value.clone(),
+                    ErrorCategory::Semantic
+                )
+            );
         }
 
         self.scopes
@@ -1130,7 +1333,17 @@ impl<'a> SemanticAnalyzer {
 
     fn visit_var(&self, node: &NodeType<'a>) {
         if self.scopes.lookup(node.value().unwrap()).is_none() {
-            panic!("Not in SymbolTable: {}", node.value().unwrap())
+            panic!(
+                "{}",
+                Error::new(
+                    format!("Not in SymbolTable: {}", node.value().unwrap()),
+                    ErrorKind::IdNotFound,
+                    node.token().unwrap().line,
+                    node.token().unwrap().col,
+                    node.token().unwrap().value.clone(),
+                    ErrorCategory::Semantic
+                )
+            );
         }
     }
 
@@ -1220,6 +1433,7 @@ impl<'a> SourceToSourceCompiler {
             Node::VarDecl => self.visit_var_decl(node),
             Node::Assign => self.visit_assign(node),
             Node::Var => self.visit_var(node),
+            Node::Num => self.visit_num(node),
             _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
@@ -1340,13 +1554,23 @@ impl<'a> SourceToSourceCompiler {
 
         if self
             .scopes
-            .lookup_current_scope(children[0].token().unwrap().value.as_ref().unwrap())
+            .lookup_current_scope(children[0].token().unwrap().value.as_ref())
             .is_some()
         {
             panic!(
-                "Duplicate identifier: {}",
-                children[0].token().unwrap().value.as_ref().unwrap()
-            )
+                "{}",
+                Error::new(
+                    format!(
+                        "Duplicate identifier: {}",
+                        children[0].token().unwrap().value
+                    ),
+                    ErrorKind::DuplicateId,
+                    children[0].token().unwrap().line,
+                    children[0].token().unwrap().col,
+                    children[0].token().unwrap().value.clone(),
+                    ErrorCategory::Semantic
+                )
+            );
         }
 
         self.scopes
@@ -1375,7 +1599,17 @@ impl<'a> SourceToSourceCompiler {
 
     fn visit_var(&mut self, node: &NodeType<'a>) {
         if self.scopes.lookup(node.value().unwrap()).is_none() {
-            panic!("Not in SymbolTable: {}", node.value().unwrap())
+            panic!(
+                "{}",
+                Error::new(
+                    format!("Not in SymbolTable: {}", node.value().unwrap()),
+                    ErrorKind::IdNotFound,
+                    node.token().unwrap().line,
+                    node.token().unwrap().col,
+                    node.token().unwrap().value.clone(),
+                    ErrorCategory::Semantic
+                )
+            );
         }
 
         let symbol_tuple = self.scopes.lookup(node.value().unwrap()).unwrap();
@@ -1399,6 +1633,10 @@ impl<'a> SourceToSourceCompiler {
             Symbol::Kind(matched_symbol) => matched_symbol.clone(),
             _ => panic!("No support for this Symbol: {:?}", symbol),
         }
+    }
+
+    fn visit_num(&mut self, node: &NodeType<'a>) {
+        self.output.push_str(node.value().unwrap());
     }
 }
 
@@ -1505,7 +1743,7 @@ impl<'a> Interpreter {
     fn visit_assign(&mut self, node: &NodeType<'a>) {
         let children = node.children();
         self.global_scope.insert(
-            children[0].token().unwrap().value.clone().unwrap(),
+            children[0].token().unwrap().value.clone(),
             self.visit_expr(children[1]).to_string(),
         );
     }

@@ -2,7 +2,7 @@ use lsbasi_rust::{Interpreter, Lexer, Parser, SemanticAnalyzer, SourceToSourceCo
 use std::fs;
 
 fn main() {
-    let input = fs::read_to_string("prg14.pas").expect("Something went wrong reading the file");
+    let input = fs::read_to_string("prg16.pas").expect("Something went wrong reading the file");
 
     let mut lexer = Lexer::new(&input);
     let mut parser = Parser::new(&mut lexer);

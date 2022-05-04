@@ -16,6 +16,8 @@ enum ErrorKind {
     UnexpectedToken,
     DuplicateId,
     IdNotFound,
+    WrongParamsNum,
+    WrongSymbolType,
 }
 
 #[derive(Debug)]
@@ -389,6 +391,7 @@ pub enum Node {
     UnaryOp,
     Program,
     Procedure,
+    ProcedureCall,
     Params,
     Block,
     Compound,
@@ -468,6 +471,12 @@ struct ProcedureDecl<'a> {
     name: String,
     params: Vec<Box<NodeType<'a>>>,
     block: Box<NodeType<'a>>,
+}
+
+struct ProcedureCall<'a> {
+    token: Token,
+    var_node: Box<NodeType<'a>>,
+    args: Vec<Box<NodeType<'a>>>,
 }
 
 impl<'a> BinOp<'a> {
@@ -798,6 +807,34 @@ impl<'a> Ast<'a> for ProcedureDecl<'a> {
     }
 }
 
+impl<'a> ProcedureCall<'a> {
+    fn new(token: Token, var_node: Box<NodeType<'a>>, args: Vec<Box<NodeType<'a>>>) -> Self {
+        ProcedureCall {
+            token,
+            var_node,
+            args,
+        }
+    }
+}
+
+impl<'a> Ast<'a> for ProcedureCall<'a> {
+    fn node(&self) -> Node {
+        Node::ProcedureCall
+    }
+
+    fn token(&self) -> Option<&Token> {
+        Some(&self.token)
+    }
+
+    fn value(&self) -> Option<&str> {
+        Some(self.var_node.value().unwrap())
+    }
+
+    fn children(&self) -> Vec<&NodeType<'a>> {
+        self.args.iter().map(|n| &**n).collect()
+    }
+}
+
 pub struct Parser<'a> {
     lexer: &'a mut Lexer<'a>,
     current_token: Token,
@@ -974,17 +1011,50 @@ impl<'a> Parser<'a> {
     fn statement(&mut self) -> Box<NodeType<'a>> {
         match self.current_token.kind {
             TokenKind::Begin => self.compound_statement(),
-            TokenKind::Id => self.assignment_statement(),
+            TokenKind::Id => self.id_statment(),
             _ => self.empty(),
         }
     }
 
-    fn assignment_statement(&mut self) -> Box<NodeType<'a>> {
+    fn id_statment(&mut self) -> Box<NodeType<'a>> {
         let left = self.variable();
-        let token = self.current_token.clone();
-        self.eat(TokenKind::Assign).unwrap();
+        match self.current_token.kind {
+            TokenKind::Lparen => {
+                let mut proc_args: Vec<Box<NodeType<'a>>> = Vec::new();
+                self.eat(TokenKind::Lparen).unwrap();
+                if self.current_token.kind != TokenKind::Rparen {
+                    proc_args.push(self.expr());
+                }
+                while self.current_token.kind == TokenKind::Comma {
+                    self.eat(TokenKind::Comma).unwrap();
+                    proc_args.push(self.expr());
+                }
+                self.eat(TokenKind::Rparen).unwrap();
 
-        Box::new(Assign::new(left, token, self.expr()))
+                Box::new(ProcedureCall::new(
+                    left.token().unwrap().clone(),
+                    left,
+                    proc_args,
+                ))
+            }
+            TokenKind::Assign => {
+                let token = self.current_token.clone();
+                self.eat(TokenKind::Assign).unwrap();
+
+                Box::new(Assign::new(left, token, self.expr()))
+            }
+            _ => panic!(
+                "{}",
+                Error::new(
+                    format!("Invalid token. Token kind: {:?}", self.current_token.kind),
+                    ErrorKind::UnexpectedToken,
+                    self.current_token.line,
+                    self.current_token.col,
+                    self.current_token.value.clone(),
+                    ErrorCategory::Parser
+                )
+            ),
+        }
     }
 
     fn variable(&mut self) -> Box<NodeType<'a>> {
@@ -1250,6 +1320,7 @@ impl<'a> SemanticAnalyzer {
             Node::UnaryOp => self.visit_unary_op(node),
             Node::Var => self.visit_var(node),
             Node::Procedure => self.visit_procedure_decl(node),
+            Node::ProcedureCall => self.visit_procedure_call(node),
             _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
@@ -1387,6 +1458,57 @@ impl<'a> SemanticAnalyzer {
         println!("{:#?}", self.scopes);
     }
 
+    fn visit_procedure_call(&mut self, node: &NodeType<'a>) {
+        let symbol_info = self.scopes.lookup(node.value().unwrap());
+        if symbol_info.is_none() {
+            panic!(
+                "{}",
+                Error::new(
+                    format!("Not in SymbolTable: {}", node.value().unwrap()),
+                    ErrorKind::IdNotFound,
+                    node.token().unwrap().line,
+                    node.token().unwrap().col,
+                    node.value().unwrap().to_string(),
+                    ErrorCategory::Semantic
+                )
+            );
+        }
+
+        if let Some(symbol) = symbol_info {
+            match symbol.0 {
+                Symbol::Procedure(procedure_symbol) => {
+                    if procedure_symbol.params.len() != node.children().len() {
+                        panic!(
+                            "{}",
+                            Error::new(
+                                "Wrong params num".to_string(),
+                                ErrorKind::WrongParamsNum,
+                                node.token().unwrap().line,
+                                node.token().unwrap().col,
+                                node.value().unwrap().to_string(),
+                                ErrorCategory::Semantic
+                            )
+                        );
+                    }
+                }
+                _ => panic!(
+                    "{}",
+                    Error::new(
+                        "Wrong symbol type".to_string(),
+                        ErrorKind::WrongSymbolType,
+                        node.token().unwrap().line,
+                        node.token().unwrap().col,
+                        node.value().unwrap().to_string(),
+                        ErrorCategory::Semantic
+                    )
+                ),
+            }
+        }
+        for child in node.children() {
+            self.visit(child);
+        }
+    }
+
     fn symbol_type(&self, symbol: &Symbol) -> KindSymbol {
         match symbol {
             Symbol::Kind(matched_symbol) => matched_symbol.clone(),
@@ -1430,6 +1552,7 @@ impl<'a> SourceToSourceCompiler {
             Node::NoOp => self.visit_no_op(),
             Node::BinOp => self.visit_bin_op(node),
             Node::Procedure => self.visit_procedure_decl(node),
+            Node::ProcedureCall => self.visit_procedure_call(node),
             Node::VarDecl => self.visit_var_decl(node),
             Node::Assign => self.visit_assign(node),
             Node::Var => self.visit_var(node),
@@ -1544,6 +1667,74 @@ impl<'a> SourceToSourceCompiler {
             String::from(node.value().unwrap())
         ));
         self.scopes.stack.pop();
+    }
+
+    fn visit_procedure_call(&mut self, node: &NodeType<'a>) {
+        let symbol_info = self.scopes.lookup(node.value().unwrap());
+        if symbol_info.is_none() {
+            panic!(
+                "{}",
+                Error::new(
+                    format!("Not in SymbolTable: {}", node.value().unwrap()),
+                    ErrorKind::IdNotFound,
+                    node.token().unwrap().line,
+                    node.token().unwrap().col,
+                    node.value().unwrap().to_string(),
+                    ErrorCategory::Semantic
+                )
+            );
+        }
+
+        if let Some(symbol) = symbol_info {
+            match symbol.0 {
+                Symbol::Procedure(procedure_symbol) => {
+                    if procedure_symbol.params.len() != node.children().len() {
+                        panic!(
+                            "{}",
+                            Error::new(
+                                "Wrong params num".to_string(),
+                                ErrorKind::WrongParamsNum,
+                                node.token().unwrap().line,
+                                node.token().unwrap().col,
+                                node.value().unwrap().to_string(),
+                                ErrorCategory::Semantic
+                            )
+                        );
+                    }
+                }
+                _ => panic!(
+                    "{}",
+                    Error::new(
+                        "Wrong symbol type".to_string(),
+                        ErrorKind::WrongSymbolType,
+                        node.token().unwrap().line,
+                        node.token().unwrap().col,
+                        node.value().unwrap().to_string(),
+                        ErrorCategory::Semantic
+                    )
+                ),
+            }
+        }
+
+        self.output.push_str(&format!(
+            "{}{}",
+            node.value().unwrap(),
+            self.scopes.stack.last().unwrap().scope_level
+        ));
+        self.output.push('(');
+        let mut first_pass = true;
+        for child in node.children() {
+            if !first_pass {
+                self.output.push(',');
+                self.output.push(' ');
+            } else {
+                first_pass = false;
+            }
+            self.visit(child);
+        }
+        self.output.push(')');
+        self.output.push(';');
+        self.output.push('\n');
     }
 
     fn visit_var_decl(&mut self, node: &NodeType<'a>) {
@@ -1671,6 +1862,7 @@ impl<'a> Interpreter {
             Node::VarDecl => self.visit_var_decl(),
             Node::Type => self.visit_type(),
             Node::Procedure => self.visit_procedure_decl(),
+            Node::ProcedureCall => self.visit_procedure_call(),
             _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
@@ -1758,6 +1950,8 @@ impl<'a> Interpreter {
     fn visit_no_op(&self) {}
 
     fn visit_procedure_decl(&mut self) {}
+
+    fn visit_procedure_call(&mut self) {}
 
     pub fn interpret(&mut self, tree: &NodeType<'a>) {
         self.visit(tree)

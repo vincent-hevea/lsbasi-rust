@@ -1835,8 +1835,65 @@ impl<'a> SourceToSourceCompiler {
 // INTERPRETER                                                 //
 // /////////////////////////////////////////////////////////// //
 
+#[derive(Debug)]
+enum ArKind {
+    Program,
+}
+
+#[derive(Debug)]
+struct ActivationRecord {
+    name: String,
+    kind: ArKind,
+    nesting_level: i32,
+    members: HashMap<String, String>,
+}
+
+impl ActivationRecord {
+    fn new(name: String, kind: ArKind, nesting_level: i32) -> Self {
+        ActivationRecord {
+            name,
+            kind,
+            nesting_level,
+            members: HashMap::new(),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&String> {
+        self.members.get(key)
+    }
+
+    fn insert(&mut self, key: String, value: String) {
+        self.members.insert(key, value);
+    }
+}
+
+#[derive(Debug)]
+struct CallStack {
+    records: Vec<ActivationRecord>,
+}
+
+impl CallStack {
+    fn new() -> Self {
+        CallStack {
+            records: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, ar: ActivationRecord) {
+        self.records.push(ar);
+    }
+
+    fn pop(&mut self) -> Option<ActivationRecord> {
+        self.records.pop()
+    }
+
+    fn peek_mut(&mut self) -> Option<&mut ActivationRecord> {
+        self.records.last_mut()
+    }
+}
+
 pub struct Interpreter {
-    pub global_scope: HashMap<String, String>,
+    call_stack: CallStack,
 }
 
 impl Default for Interpreter {
@@ -1848,7 +1905,7 @@ impl Default for Interpreter {
 impl<'a> Interpreter {
     pub fn new() -> Self {
         Interpreter {
-            global_scope: HashMap::new(),
+            call_stack: CallStack::new(),
         }
     }
 
@@ -1867,7 +1924,7 @@ impl<'a> Interpreter {
         };
     }
 
-    fn visit_expr(&self, node: &NodeType<'a>) -> f32 {
+    fn visit_expr(&mut self, node: &NodeType<'a>) -> f32 {
         match node.node() {
             Node::Num => self.visit_num(node),
             Node::BinOp => self.visit_bin_op(node),
@@ -1878,7 +1935,15 @@ impl<'a> Interpreter {
     }
 
     fn visit_program(&mut self, node: &NodeType<'a>) {
-        self.visit(node.children()[0])
+        self.call_stack.push(ActivationRecord::new(
+            node.value().unwrap().to_string(),
+            ArKind::Program,
+            1,
+        ));
+        println!("{:?}", self.call_stack);
+        self.visit(node.children()[0]);
+        self.call_stack.pop();
+        println!("{:?}", self.call_stack);
     }
 
     fn visit_block(&mut self, node: &NodeType<'a>) {
@@ -1891,7 +1956,7 @@ impl<'a> Interpreter {
 
     fn visit_type(&mut self) {}
 
-    fn visit_bin_op(&self, node: &NodeType<'a>) -> f32 {
+    fn visit_bin_op(&mut self, node: &NodeType<'a>) -> f32 {
         let children = node.children();
         match node.token().unwrap().kind {
             TokenKind::Plus => self.visit_expr(children[0]) + self.visit_expr(children[1]),
@@ -1918,7 +1983,7 @@ impl<'a> Interpreter {
         node.value().unwrap().parse::<f32>().unwrap()
     }
 
-    fn visit_unary_op(&self, node: &NodeType<'a>) -> f32 {
+    fn visit_unary_op(&mut self, node: &NodeType<'a>) -> f32 {
         match node.token().unwrap().kind {
             TokenKind::Plus => self.visit_expr(node.children()[0]),
             TokenKind::Minus => -self.visit_expr(node.children()[0]),
@@ -1934,14 +1999,21 @@ impl<'a> Interpreter {
 
     fn visit_assign(&mut self, node: &NodeType<'a>) {
         let children = node.children();
-        self.global_scope.insert(
-            children[0].token().unwrap().value.clone(),
-            self.visit_expr(children[1]).to_string(),
-        );
+        let value = self.visit_expr(children[1]).to_string();
+        self.call_stack
+            .peek_mut()
+            .unwrap()
+            .insert(children[0].token().unwrap().value.clone(), value);
+        println!("{:?}", self.call_stack);
     }
 
-    fn visit_var(&self, node: &NodeType<'a>) -> f32 {
-        match self.global_scope.get(node.value().unwrap()) {
+    fn visit_var(&mut self, node: &NodeType<'a>) -> f32 {
+        match self
+            .call_stack
+            .peek_mut()
+            .unwrap()
+            .get(node.value().unwrap())
+        {
             Some(var_value) => var_value.parse::<f32>().unwrap(),
             None => panic!("No Value for var {:?}", node.token()),
         }

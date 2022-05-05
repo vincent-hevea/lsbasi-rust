@@ -1,9 +1,24 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::iter::Peekable;
+use std::fmt::Debug;
+use std::iter::{zip, Peekable};
+use std::rc::{Rc, Weak};
 use std::str::Chars;
 
 type NodeType<'a> = dyn Ast<'a> + 'a;
+
+impl<'a> fmt::Display for NodeType<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?} {:?}", self.node(), self.value(),)
+    }
+}
+
+impl<'a> Debug for NodeType<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?} {:?}", self.node(), self.value(),)
+    }
+}
 
 // /////////////////////////////////////////////////////////// //
 // ERROR                                                       //
@@ -402,11 +417,64 @@ pub enum Node {
     NoOp,
 }
 
+#[derive(Debug, Clone)]
+enum KindSymbol {
+    Integer,
+    Real,
+}
+
+#[derive(Debug, Clone)]
+pub struct VarSymbol {
+    name: String,
+    kind: KindSymbol,
+}
+
+impl VarSymbol {
+    fn new(name: String, kind: KindSymbol) -> Self {
+        VarSymbol { name, kind }
+    }
+}
+
+#[derive(Debug)]
+struct ProcedureSymbol<'a> {
+    name: String,
+    params: Vec<VarSymbol>,
+    block: Rc<Box<NodeType<'a>>>,
+}
+
+impl<'a> ProcedureSymbol<'a> {
+    fn new(name: String, params: Vec<VarSymbol>, block: Rc<Box<NodeType<'a>>>) -> Self {
+        ProcedureSymbol {
+            name,
+            params,
+            block,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Symbol<'a> {
+    Kind(KindSymbol),
+    Var(VarSymbol),
+    Procedure(ProcedureSymbol<'a>),
+}
+
 pub trait Ast<'a> {
     fn node(&self) -> Node;
     fn token(&self) -> Option<&Token>;
     fn value(&self) -> Option<&str>;
     fn children(&self) -> Vec<&NodeType<'a>>;
+    fn block(&self) -> Option<&Rc<Box<NodeType<'a>>>> {
+        None
+    }
+    fn linked_block(&self) -> Option<&RefCell<Weak<Box<NodeType<'a>>>>> {
+        None
+    }
+    fn set_linked_block(&self, block: &Rc<Box<NodeType<'a>>>) {}
+    fn signature(&self) -> Option<&RefCell<Vec<VarSymbol>>> {
+        None
+    }
+    fn set_signature(&self, signature: Vec<VarSymbol>) {}
 }
 
 struct BinOp<'a> {
@@ -470,13 +538,15 @@ struct Params<'a> {
 struct ProcedureDecl<'a> {
     name: String,
     params: Vec<Box<NodeType<'a>>>,
-    block: Box<NodeType<'a>>,
+    block: Rc<Box<NodeType<'a>>>,
 }
 
 struct ProcedureCall<'a> {
     token: Token,
     var_node: Box<NodeType<'a>>,
     args: Vec<Box<NodeType<'a>>>,
+    linked_block: RefCell<Weak<Box<NodeType<'a>>>>,
+    signature: RefCell<Vec<VarSymbol>>,
 }
 
 impl<'a> BinOp<'a> {
@@ -781,7 +851,7 @@ impl<'a> ProcedureDecl<'a> {
         ProcedureDecl {
             name,
             params,
-            block,
+            block: Rc::from(block),
         }
     }
 }
@@ -801,9 +871,13 @@ impl<'a> Ast<'a> for ProcedureDecl<'a> {
 
     fn children(&self) -> Vec<&NodeType<'a>> {
         let mut children: Vec<&NodeType<'a>> = self.params.iter().map(|n| &**n).collect();
-        children.push(&*self.block);
+        children.push(&**self.block);
 
         children
+    }
+
+    fn block(&self) -> Option<&Rc<Box<NodeType<'a>>>> {
+        Some(&self.block)
     }
 }
 
@@ -813,6 +887,8 @@ impl<'a> ProcedureCall<'a> {
             token,
             var_node,
             args,
+            linked_block: RefCell::new(Weak::new()),
+            signature: RefCell::new(Vec::new()),
         }
     }
 }
@@ -832,6 +908,21 @@ impl<'a> Ast<'a> for ProcedureCall<'a> {
 
     fn children(&self) -> Vec<&NodeType<'a>> {
         self.args.iter().map(|n| &**n).collect()
+    }
+
+    fn linked_block(&self) -> Option<&RefCell<Weak<Box<NodeType<'a>>>>> {
+        Some(&self.linked_block)
+    }
+
+    fn set_linked_block(&self, block: &Rc<Box<NodeType<'a>>>) {
+        *self.linked_block.borrow_mut() = Rc::downgrade(block);
+    }
+
+    fn signature(&self) -> Option<&RefCell<Vec<VarSymbol>>> {
+        Some(&self.signature)
+    }
+    fn set_signature(&self, signature: Vec<VarSymbol>) {
+        *self.signature.borrow_mut() = signature;
     }
 }
 
@@ -1183,51 +1274,14 @@ impl<'a> Parser<'a> {
 // SYMBOLS, TABLES, SEMANTIC ANALYSIS                          //
 // /////////////////////////////////////////////////////////// //
 
-#[derive(Debug, Clone)]
-enum KindSymbol {
-    Integer,
-    Real,
-}
-
 #[derive(Debug)]
-struct VarSymbol {
-    name: String,
-    kind: KindSymbol,
-}
-
-impl VarSymbol {
-    fn new(name: String, kind: KindSymbol) -> Self {
-        VarSymbol { name, kind }
-    }
-}
-
-#[derive(Debug)]
-struct ProcedureSymbol {
-    name: String,
-    params: Vec<VarSymbol>,
-}
-
-impl ProcedureSymbol {
-    fn new(name: String, params: Vec<VarSymbol>) -> Self {
-        ProcedureSymbol { name, params }
-    }
-}
-
-#[derive(Debug)]
-enum Symbol {
-    Kind(KindSymbol),
-    Var(VarSymbol),
-    Procedure(ProcedureSymbol),
-}
-
-#[derive(Debug)]
-struct ScopedSymbolTable {
-    symbols: HashMap<String, Symbol>,
+struct ScopedSymbolTable<'a> {
+    symbols: HashMap<String, Symbol<'a>>,
     scope_name: String,
     scope_level: i32,
 }
 
-impl ScopedSymbolTable {
+impl<'a> ScopedSymbolTable<'a> {
     fn new(scope_name: String, scope_level: i32) -> Self {
         let mut symbols = HashMap::new();
         symbols.insert("INTEGER".to_string(), Symbol::Kind(KindSymbol::Integer));
@@ -1239,7 +1293,7 @@ impl ScopedSymbolTable {
         }
     }
 
-    fn insert(&mut self, symbol: Symbol) {
+    fn insert(&mut self, symbol: Symbol<'a>) {
         match symbol {
             Symbol::Kind(matched_symbol) => match matched_symbol {
                 KindSymbol::Integer => self
@@ -1259,22 +1313,22 @@ impl ScopedSymbolTable {
         };
     }
 
-    fn lookup(&self, name: &str) -> Option<&Symbol> {
+    fn lookup(&self, name: &str) -> Option<&Symbol<'a>> {
         self.symbols.get(name)
     }
 }
 
 #[derive(Debug)]
-pub struct ScopedSymbolTableStack {
-    stack: Vec<ScopedSymbolTable>,
+pub struct ScopedSymbolTableStack<'a> {
+    stack: Vec<ScopedSymbolTable<'a>>,
 }
 
-impl ScopedSymbolTableStack {
+impl<'a> ScopedSymbolTableStack<'a> {
     fn new() -> Self {
         ScopedSymbolTableStack { stack: Vec::new() }
     }
 
-    fn lookup(&self, name: &str) -> Option<(&Symbol, i32)> {
+    fn lookup(&self, name: &str) -> Option<(&Symbol<'a>, i32)> {
         for scope in self.stack.iter().rev() {
             if let Some(symbol) = scope.lookup(name) {
                 return Some((symbol, scope.scope_level));
@@ -1284,22 +1338,22 @@ impl ScopedSymbolTableStack {
         None
     }
 
-    fn lookup_current_scope(&self, name: &str) -> Option<&Symbol> {
+    fn lookup_current_scope(&self, name: &str) -> Option<&Symbol<'a>> {
         self.stack.last().and_then(|scope| scope.lookup(name))
     }
 }
 
-pub struct SemanticAnalyzer {
-    pub scopes: ScopedSymbolTableStack,
+pub struct SemanticAnalyzer<'a> {
+    pub scopes: ScopedSymbolTableStack<'a>,
 }
 
-impl<'a> Default for SemanticAnalyzer {
+impl<'a> Default for SemanticAnalyzer<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> SemanticAnalyzer {
+impl<'a> SemanticAnalyzer<'a> {
     pub fn new() -> Self {
         SemanticAnalyzer {
             scopes: ScopedSymbolTableStack::new(),
@@ -1329,7 +1383,7 @@ impl<'a> SemanticAnalyzer {
         self.scopes
             .stack
             .push(ScopedSymbolTable::new("global".to_string(), 1));
-        println!("{:#?}", self.scopes);
+        println!("visit_program {:#?}", self.scopes);
         self.visit(node.children()[0]);
         self.scopes.stack.pop();
     }
@@ -1373,7 +1427,7 @@ impl<'a> SemanticAnalyzer {
             .last_mut()
             .unwrap()
             .insert(Symbol::Var(VarSymbol::new(symbol_name, symbol_type)));
-        println!("{:#?}", self.scopes);
+        println!("visit_var_decl {:#?}", self.scopes);
     }
 
     fn visit_type(&self) {}
@@ -1421,8 +1475,11 @@ impl<'a> SemanticAnalyzer {
     fn visit_no_op(&self) {}
 
     fn visit_procedure_decl(&mut self, node: &NodeType<'a>) {
-        let mut procedure_symbol =
-            ProcedureSymbol::new(String::from(node.value().unwrap()), Vec::new());
+        let mut procedure_symbol = ProcedureSymbol::new(
+            String::from(node.value().unwrap()),
+            Vec::new(),
+            Rc::clone(node.block().unwrap()),
+        );
         let mut new_scope = ScopedSymbolTable::new(
             String::from(node.value().unwrap()),
             self.scopes.stack.len() as i32 + 1,
@@ -1452,10 +1509,10 @@ impl<'a> SemanticAnalyzer {
             .unwrap()
             .insert(Symbol::Procedure(procedure_symbol));
         self.scopes.stack.push(new_scope);
-        println!("{:#?}", self.scopes);
+        println!("visit_procedure_decl (push) {:#?}", self.scopes);
         self.visit(*node.children().last().unwrap());
         self.scopes.stack.pop();
-        println!("{:#?}", self.scopes);
+        println!("visit_procedure_decl (pop) {:#?}", self.scopes);
     }
 
     fn visit_procedure_call(&mut self, node: &NodeType<'a>) {
@@ -1490,6 +1547,8 @@ impl<'a> SemanticAnalyzer {
                             )
                         );
                     }
+                    node.set_linked_block(&procedure_symbol.block);
+                    node.set_signature(procedure_symbol.params.to_vec());
                 }
                 _ => panic!(
                     "{}",
@@ -1521,18 +1580,18 @@ impl<'a> SemanticAnalyzer {
 // SOURCE-TO-SOURCE COMPILER                                   //
 // /////////////////////////////////////////////////////////// //
 
-pub struct SourceToSourceCompiler {
-    scopes: ScopedSymbolTableStack,
+pub struct SourceToSourceCompiler<'a> {
+    scopes: ScopedSymbolTableStack<'a>,
     output: String,
 }
 
-impl<'a> Default for SourceToSourceCompiler {
+impl<'a> Default for SourceToSourceCompiler<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> SourceToSourceCompiler {
+impl<'a> SourceToSourceCompiler<'a> {
     pub fn new() -> Self {
         SourceToSourceCompiler {
             scopes: ScopedSymbolTableStack::new(),
@@ -1609,8 +1668,11 @@ impl<'a> SourceToSourceCompiler {
     }
 
     fn visit_procedure_decl(&mut self, node: &NodeType<'a>) {
-        let mut procedure_symbol =
-            ProcedureSymbol::new(String::from(node.value().unwrap()), Vec::new());
+        let mut procedure_symbol = ProcedureSymbol::new(
+            String::from(node.value().unwrap()),
+            Vec::new(),
+            Rc::clone(node.block().unwrap()),
+        );
         let mut new_scope = ScopedSymbolTable::new(
             String::from(node.value().unwrap()),
             self.scopes.stack.len() as i32 + 1,
@@ -1701,6 +1763,8 @@ impl<'a> SourceToSourceCompiler {
                             )
                         );
                     }
+                    node.set_linked_block(&procedure_symbol.block);
+                    node.set_signature(procedure_symbol.params.to_vec());
                 }
                 _ => panic!(
                     "{}",
@@ -1838,6 +1902,7 @@ impl<'a> SourceToSourceCompiler {
 #[derive(Debug)]
 enum ArKind {
     Program,
+    Procedure,
 }
 
 #[derive(Debug)]
@@ -1919,7 +1984,7 @@ impl<'a> Interpreter {
             Node::VarDecl => self.visit_var_decl(),
             Node::Type => self.visit_type(),
             Node::Procedure => self.visit_procedure_decl(),
-            Node::ProcedureCall => self.visit_procedure_call(),
+            Node::ProcedureCall => self.visit_procedure_call(node),
             _ => panic!("Invalid node. Node: {:?}", node.node()),
         };
     }
@@ -1935,15 +2000,16 @@ impl<'a> Interpreter {
     }
 
     fn visit_program(&mut self, node: &NodeType<'a>) {
+        println!("visit_program (start) {:?}", self.call_stack);
         self.call_stack.push(ActivationRecord::new(
             node.value().unwrap().to_string(),
             ArKind::Program,
             1,
         ));
-        println!("{:?}", self.call_stack);
+        println!("visit_program (first ar) {:#?}", self.call_stack);
         self.visit(node.children()[0]);
         self.call_stack.pop();
-        println!("{:?}", self.call_stack);
+        println!("visit_program (end) {:#?}", self.call_stack);
     }
 
     fn visit_block(&mut self, node: &NodeType<'a>) {
@@ -2004,7 +2070,7 @@ impl<'a> Interpreter {
             .peek_mut()
             .unwrap()
             .insert(children[0].token().unwrap().value.clone(), value);
-        println!("{:?}", self.call_stack);
+        println!("visit_assign {:#?}", self.call_stack);
     }
 
     fn visit_var(&mut self, node: &NodeType<'a>) -> f32 {
@@ -2023,7 +2089,20 @@ impl<'a> Interpreter {
 
     fn visit_procedure_decl(&mut self) {}
 
-    fn visit_procedure_call(&mut self) {}
+    fn visit_procedure_call(&mut self, node: &NodeType<'a>) {
+        let mut ar = ActivationRecord::new(node.value().unwrap().to_string(), ArKind::Procedure, 2);
+
+        for (param, arg) in zip(&*node.signature().unwrap().borrow(), node.children()) {
+            ar.insert(param.name.clone(), self.visit_expr(arg).to_string());
+        }
+
+        self.call_stack.push(ar);
+        println!("visit_procedure_call (push ar) {:#?}", self.call_stack);
+        self.visit(&**node.linked_block().unwrap().borrow().upgrade().unwrap());
+
+        self.call_stack.pop();
+        println!("visit_procedure_call (pop ar) {:#?}", self.call_stack);
+    }
 
     pub fn interpret(&mut self, tree: &NodeType<'a>) {
         self.visit(tree)
